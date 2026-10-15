@@ -587,8 +587,6 @@ function renderOpenWork(timeline) {
     for (const b of r.branches || []) branches.push({ ...b, repo: r });
   }
   const wrap = el('div', 'openwork');
-  const board = boardSection();
-  if (board) wrap.appendChild(board);
   // Ready-for-review first, drafts last; newest activity first within each.
   prs.sort((a, b) => (a.draft - b.draft) || b.ts.localeCompare(a.ts));
   branches.sort((a, b) => b.ts.localeCompare(a.ts));
@@ -615,6 +613,9 @@ function renderOpenWork(timeline) {
         quiet ? [['quiet ' + age + 'd', 'warn']] : [], b.branch);
     })));
   }
+  // The board is what's planned; open PRs and branches are what needs you now, so they go first.
+  const board = boardSection();
+  if (board) wrap.appendChild(board);
   wrap.appendChild(el('div', 'kicker mono', 'Shipped'));
   timeline.appendChild(wrap);
 }
