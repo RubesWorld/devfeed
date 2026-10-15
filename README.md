@@ -12,8 +12,9 @@ you last looked.
 - **Since you last looked.** Counts merges, pushes, new PRs, active branches and board
   moves since your last visit, and marks those rows. Tracked per device.
 - **Waiting on you.** Open PRs with check and review state, branches with recent
-  commits but no PR, and project-board cards. Flags PRs open 7+ days, branches quiet
-  3+ days, cards stuck in progress for 3+ days, and cards labelled `needs-human`.
+  commits but no PR, and project-board cards with their own labels. Flags PRs open
+  7+ days, branches quiet 3+ days, cards stuck in progress for 3+ days, and puts cards
+  with your attention label (`needs-human` by default) on top.
 - **Repos find themselves.** Every non-archived repo you've pushed to in the last two
   weeks shows up, most recent first, and drops off when it goes quiet. Nothing to list.
 - **Ship Log.** A second, calmer view: everything shipped, by project and day.
@@ -77,12 +78,19 @@ for macOS, a systemd unit for Linux, and a cron line if you'd rather serve
 Columns come from the board's own `Status` field, in order. Optional keys: `title`
 (defaults to the board's name), `done_column` (`"Done"`), `active_columns` (which
 columns count as "in progress" for the stuck flag; defaults to the last two before
-Done) and `attention_label` (`"needs-human"`). Reading a board needs the
+Done), `attention_label` (`"needs-human"`) and `hide_labels` (`[]`). Reading a board needs the
 `read:project` scope: `gh auth refresh -s read:project`.
 
-Labels on an issue add to its card: the attention label puts it at the top marked
-"needs you", and a `size:` label (`size:s`, `size:m`, `size:l`, any suffix) shows as a
-size tag. Only issues are shown; draft notes and PR cards on the board are skipped.
+Each card shows the issue's own labels in their GitHub colours, up to three, with the
+rest behind a "+N" you can hover. One label is special: the `attention_label` puts the
+card at the top, marked "needs you". To keep a noisy label off the cards, list it in
+`hide_labels`:
+
+```json
+"board": { "owner": "you", "number": 1, "attention_label": "blocked", "hide_labels": ["good first issue"] }
+```
+
+Only issues are shown; draft notes and PR cards on the board are skipped.
 
 ## Limits
 

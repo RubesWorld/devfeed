@@ -126,6 +126,8 @@
   .entry .flag.ok { color: var(--good); border-color: var(--good); }
   .openwork { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
   .entry .flag.warn { color: var(--warn); border-color: var(--warn); }
+  .entry .flag.label { display: inline-flex; align-items: center; gap: 5px; }
+  .entry .flag.label i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
   .entry.old { opacity: 0.62; }
   .entry.old:hover { opacity: 1; }
   .entry.new { box-shadow: inset 3px 0 0 var(--new); }
@@ -431,7 +433,16 @@ function openWorkRow(it, icon, verb, flags, refText) {
   const pname = el('span', null, it.repo.display);
   pname.style.color = color; pname.style.fontWeight = '500';
   meta.append(pname, el('span', 'verb', verb));
-  for (const [text, cls] of flags) meta.appendChild(el('span', 'flag mono' + (cls ? ' ' + cls : ''), text));
+  for (const [text, cls, dot, title] of flags) {
+    const f = el('span', 'flag mono' + (cls ? ' ' + cls : ''), text);
+    if (title) f.title = title;
+    if (dot) {   // a GitHub label: its own colour as a dot, so any colour stays readable
+      const i = el('i');
+      i.style.background = dot;
+      f.prepend(i);
+    }
+    meta.appendChild(f);
+  }
   body.appendChild(meta);
   a.appendChild(body);
   const ref = el('span', 'ref mono', refText);
@@ -458,6 +469,7 @@ function isNew(ts) { return !!ts && ts > since; }
 function days(ts) { return Math.floor((Date.now() - new Date(ts)) / 86400000); }
 
 const STALE_PR_DAYS = 7, QUIET_BRANCH_DAYS = 3, STUCK_CARD_DAYS = 3;
+const MAX_LABELS = 3;   // per board card; the rest collapse into "+N"
 
 function repoOf(name) {
   return feed.repos.find(r => r.repo === name) || { repo: name, display: name.split('/')[1], slot: 8 };
@@ -550,7 +562,14 @@ function boardSection() {
     const age = c.since ? days(c.since) : 0;
     if (active.includes(c.status) && age >= STUCK_CARD_DAYS)
       flags.push(['stuck ' + age + 'd', 'warn']);
-    if (c.size) flags.push(['size ' + c.size]);
+    const labels = c.labels || [];
+    for (const l of labels.slice(0, MAX_LABELS)) {
+      flags.push([l.name, 'label', /^[0-9a-f]{6}$/i.test(l.color) ? '#' + l.color : 'var(--d-muted)']);
+    }
+    if (labels.length > MAX_LABELS) {
+      const rest = labels.slice(MAX_LABELS).map(l => l.name).join(', ');
+      flags.push(['+' + (labels.length - MAX_LABELS), null, null, rest]);
+    }
     const row = openWorkRow({ ...c, ts: c.since || '', repo: repoOf(c.repo) }, boardIcon,
       c.status + (c.since ? ' since ' + rel(c.since) : ''), flags, c.ref);
     list.appendChild(row);

@@ -239,7 +239,7 @@ query($owner: String!, $number: Int!) {
               ... on Issue {
                 number title url state
                 repository { nameWithOwner }
-                labels(first: 20) { nodes { name } }
+                labels(first: 20) { nodes { name color } }
               }
             }
           }
@@ -263,6 +263,7 @@ def fetch_board(board):
                            "(gh needs the read:project scope: gh auth refresh -s read:project)")
     done = board.get("done_column", "Done")
     attention = board.get("attention_label", "needs-human")
+    hidden_labels = set(board.get("hide_labels", []))
     columns = [o["name"] for o in (project.get("field") or {}).get("options", [])
                if o["name"] != done]
     cutoff = utc_cutoff(BOARD_DONE_DAYS)
@@ -275,7 +276,7 @@ def fetch_board(board):
         since = st["updatedAt"] if st else None
         if status == done and (since or "") < cutoff:
             continue
-        labels = [l["name"] for l in c["labels"]["nodes"]]
+        labels = c["labels"]["nodes"]
         cards.append({
             "title": c["title"].strip(),
             "url": c["url"],
@@ -284,8 +285,11 @@ def fetch_board(board):
             "status": "Done" if status == done else status,
             "since": since,
             "closed": c["state"] != "OPEN",
-            "needs_human": attention in labels,
-            "size": next((l[5:] for l in labels if l.startswith("size:")), None),
+            "needs_human": any(l["name"] == attention for l in labels),
+            # The card's own labels, in GitHub's colours. The attention label
+            # is shown as "needs you" instead, so it isn't repeated here.
+            "labels": [{"name": l["name"], "color": l["color"]} for l in labels
+                       if l["name"] != attention and l["name"] not in hidden_labels],
         })
     return {
         "title": board.get("title") or project["title"],
@@ -426,19 +430,28 @@ def demo_feed():
         repos.append({"repo": repo, "display": display, "slot": slot,
                       "last_activity": its[0]["ts"], "spark": spark, "items": its,
                       "open_prs": open_prs, "branches": brs})
+    feature, bug, grey = ("feature", "a2eeef"), ("bug", "d73a4a"), "ededed"
     cards = [
-        ("Gift cards at checkout", "acme/storefront", "#150", "In Progress", 90, False, "m"),
-        ("Product reviews with photos", "acme/storefront", "#144", "Review", 30, False, "l"),
-        ("Decide on a search provider", "acme/api", "#309", "Ready", 40, True, "s"),
-        ("Widget for the home screen", "acme/mobile", "#61", "Inbox", 200, False, None),
-        ("Rate limit the search endpoint", "acme/api", "#305", "Done", 20, False, "s"),
+        ("Gift cards at checkout", "acme/storefront", "#150", "In Progress", 90, False,
+         [feature, ("size:m", grey), ("payments", "fbca04")]),
+        ("Product reviews with photos", "acme/storefront", "#144", "Review", 30, False,
+         [feature, ("size:l", grey)]),
+        ("Decide on a search provider", "acme/api", "#309", "Ready", 40, True,
+         [("question", "d876e3")]),
+        ("Crash when a saved list is empty", "acme/mobile", "#62", "Ready", 10, False,
+         [bug, ("priority:high", "b60205")]),
+        ("Widget for the home screen", "acme/mobile", "#61", "Inbox", 200, False,
+         [feature, ("design", "0e8a16"), ("ios", "5319e7"), ("android", "1d76db")]),
+        ("Rate limit the search endpoint", "acme/api", "#305", "Done", 20, False, [feature]),
     ]
     board = {"title": "Roadmap", "url": "https://github.com/orgs/acme/projects/1",
              "columns": ["Inbox", "Ready", "In Progress", "Review"],
              "active_columns": ["In Progress", "Review"],
              "cards": [{"title": t, "url": f"https://github.com/{r}/issues/{n[1:]}", "repo": r,
                         "ref": n, "status": st, "since": ago(h), "closed": st == "Done",
-                        "needs_human": nh, "size": sz} for t, r, n, st, h, nh, sz in cards]}
+                        "needs_human": nh,
+                        "labels": [{"name": ln, "color": lc} for ln, lc in labels]}
+                       for t, r, n, st, h, nh, labels in cards]}
     return {"generated_at": ago(0), "interval_minutes": 5, "spark_days": 14, "days": 30,
             "repos": repos, "board": board}
 
