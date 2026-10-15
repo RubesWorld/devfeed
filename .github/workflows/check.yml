@@ -1,0 +1,36 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile
+        run: python -m py_compile devfeed.py
+      - name: Page script parses
+        run: |
+          python - <<'PY' > page.js
+          import re
+          html = open("public/index.html").read()
+          print(re.search(r"<script>(.*?)</script>", html, re.S).group(1))
+          PY
+          node --check page.js
+      - name: Demo serves the page and a valid feed
+        run: |
+          python devfeed.py demo --port 8399 &
+          for i in $(seq 1 20); do curl -sf http://127.0.0.1:8399/ > /dev/null && break; sleep 0.5; done
+          curl -sf -D - -o /dev/null http://127.0.0.1:8399/index.html | grep -i "cache-control: no-cache"
+          curl -sf http://127.0.0.1:8399/feed.json | python -c "import json, sys; f = json.load(sys.stdin); assert f['repos'] and f['board']['cards']"
+      - name: Missing config fails cleanly
+        run: |
+          if python devfeed.py collect --config nope.json; then exit 1; fi

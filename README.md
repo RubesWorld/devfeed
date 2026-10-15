@@ -33,7 +33,9 @@ Open http://127.0.0.1:8300.
 
 ## Run it on your repos
 
-Requires the [GitHub CLI](https://cli.github.com), logged in (`gh auth login`).
+Requires the [GitHub CLI](https://cli.github.com), logged in with `gh auth login`. On a
+server or in a container, set `GH_TOKEN` to a personal access token instead; `gh` picks
+it up. The token needs read access to your repos, plus `read:project` if you use a board.
 
 ```sh
 cp config.example.json config.json   # set "owner" to your GitHub user or org
@@ -77,6 +79,21 @@ Columns come from the board's own `Status` field, in order. Optional keys: `titl
 columns count as "in progress" for the stuck flag; defaults to the last two before
 Done) and `attention_label` (`"needs-human"`). Reading a board needs the
 `read:project` scope: `gh auth refresh -s read:project`.
+
+Labels on an issue add to its card: the attention label puts it at the top marked
+"needs you", and a `size:` label (`size:s`, `size:m`, `size:l`, any suffix) shows as a
+size tag. Only issues are shown; draft notes and PR cards on the board are skipped.
+
+## Limits
+
+devfeed is built for one person's or one small team's repos, not a large org:
+
+- Up to 200 repos per owner are considered (most recently pushed first).
+- Per repo: the latest 60 commits, 20 recently closed PRs, 20 open PRs and 20 branches.
+- The first 100 cards on the board.
+
+Each repo costs about three GitHub API calls per run, so 20 active repos at the default
+5-minute interval use about 15% of GitHub's hourly limit.
 
 ## Security
 
