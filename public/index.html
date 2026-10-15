@@ -1,0 +1,833 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev Feed</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%231a1a19'/%3E%3Ctext x='50' y='71' font-size='58' text-anchor='middle' fill='%23ffffff' font-family='system-ui'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Two committed looks: Feed is the dark instrument panel, Ship Log is light paper. */
+  :root {
+    --d-page: #0d0d0d; --d-surface: #1a1a19; --d-ink: #ffffff; --d-ink2: #c3c2b7;
+    --d-muted: #898781; --d-grid: #2c2c2a; --d-border: rgba(255,255,255,0.10);
+    --l-page: #f7f4ee; --l-surface: #fffdf8; --l-ink: #2b2620; --l-ink2: #6b5d4a;
+    --l-muted: #8a7f6e; --l-grid: #ddd5c7; --l-border: #ddd5c7;
+    --good: #0ca30c; --critical: #d03b3b; --warn: #c98500; --new: #3987e5;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { height: 100%; }
+  body {
+    min-height: 100%;
+    font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+    font-size: 15px; line-height: 1.45;
+    transition: background 0.25s;
+  }
+  body.view-feed { background: var(--d-page); color: var(--d-ink); }
+  body.view-shiplog { background: var(--l-page); color: var(--l-ink); }
+  .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 26px 48px; }
+
+  /* ------- header ------- */
+  header { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; margin-bottom: 26px; }
+  .mark {
+    width: 42px; height: 42px; border-radius: 10px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 21px; font-weight: 600;
+  }
+  .view-feed .mark { background: var(--d-surface); border: 1px solid var(--d-border); }
+  .view-shiplog .mark { background: var(--l-surface); border: 1px solid var(--l-border); }
+  .titleblock { display: flex; flex-direction: column; gap: 1px; }
+  .titleblock h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+  .tagline { font-size: 12px; }
+  .view-feed .tagline { color: var(--d-muted); }
+  .view-shiplog .tagline { color: var(--l-muted); }
+  .spacer { flex: 1 1 auto; }
+  .today-date { font-size: 13px; }
+  .view-feed .today-date { color: var(--d-muted); }
+  .view-shiplog .today-date { color: var(--l-muted); }
+  .pill {
+    display: flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 99px;
+    font-size: 12px;
+  }
+  .view-feed .pill { background: var(--d-surface); border: 1px solid var(--d-border); color: var(--d-ink2); }
+  .view-shiplog .pill { background: var(--l-surface); border: 1px solid var(--l-border); color: var(--l-ink2); }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .pill.stale { color: var(--critical); font-weight: 600; }
+  .pill.stale .dot { background: var(--critical); }
+  #filter-pill { cursor: pointer; border: none; font-family: inherit; min-height: 30px; }
+  #filter-pill[hidden] { display: none; }   /* .pill's display: flex would otherwise beat [hidden] */
+  #filter-pill .x { font-size: 13px; line-height: 1; }
+  .view-feed #filter-pill { background: #2c2c2a; color: var(--d-ink); }
+  .view-shiplog #filter-pill { background: #2b2620; color: #f7f4ee; }
+
+  .switch {
+    display: flex; border-radius: 99px; padding: 3px; gap: 2px;
+  }
+  .view-feed .switch { background: var(--d-surface); border: 1px solid var(--d-border); }
+  .view-shiplog .switch { background: var(--l-surface); border: 1px solid var(--l-border); }
+  .switch button {
+    border: none; background: none; font-family: inherit; font-size: 12.5px; font-weight: 500;
+    padding: 6px 14px; border-radius: 99px; cursor: pointer; min-height: 30px;
+  }
+  .view-feed .switch button { color: var(--d-muted); }
+  .view-shiplog .switch button { color: var(--l-muted); }
+  .view-feed .switch button.on { background: #2c2c2a; color: var(--d-ink); }
+  .view-shiplog .switch button.on { background: #2b2620; color: #f7f4ee; }
+
+  /* ------- feed view: instrument panel ------- */
+  .layout { display: flex; gap: 32px; align-items: flex-start; }
+  .rail { width: 320px; flex: none; display: flex; flex-direction: column; gap: 14px; }
+  .kicker { font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; }
+  .view-feed .kicker { color: var(--d-muted); }
+  .card {
+    background: var(--d-surface); border: 1px solid var(--d-border); border-radius: 12px;
+    padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 10px;
+    position: relative; overflow: hidden; cursor: pointer;
+    transition: opacity 0.15s, border-color 0.15s;
+  }
+  .card.dim { opacity: 0.5; }
+  .card.dim:hover { opacity: 0.8; }
+  .card .idbar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+  .card .cardhead { display: flex; align-items: baseline; gap: 10px; }
+  .card .cardhead a { font-size: 15.5px; font-weight: 600; color: var(--d-ink); text-decoration: none; }
+  .card .cardhead a:hover { text-decoration: underline; }
+  .card .when { margin-left: auto; font-size: 12px; color: var(--d-muted); }
+  .card .totals { display: flex; align-items: baseline; font-size: 12.5px; color: var(--d-ink2); }
+  .card .totals .span { margin-left: auto; font-size: 11px; color: var(--d-muted); }
+  .spark { display: block; width: 100%; }
+
+  .timeline { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+  .dayhead { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .dayhead:first-child { margin-top: 0; }
+  .dayhead .rule { flex: 1 1 auto; height: 1px; background: var(--d-grid); }
+  .dayhead .count { font-size: 12px; color: var(--d-muted); }
+  .entries { display: flex; flex-direction: column; gap: 3px; }
+  .entry {
+    display: flex; align-items: center; gap: 13px; padding: 11px 13px; border-radius: 10px;
+    text-decoration: none; color: inherit;
+  }
+  .entry:hover { background: rgba(255,255,255,0.04); }
+  .entry.latest { background: var(--d-surface); border: 1px solid var(--d-border); }
+  .entry svg { flex: none; }
+  .entry .body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+  .entry .etitle {
+    font-size: 14px; font-weight: 500; color: var(--d-ink2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .entry.latest .etitle { color: var(--d-ink); }
+  .entry .meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .entry .meta .verb { color: var(--d-muted); }
+  .entry .ref { font-size: 11.5px; padding: 3px 8px; border-radius: 6px; color: var(--d-ink2); flex: none; }
+  .entry .sha { font-size: 11.5px; color: var(--d-muted); flex: none; }
+  .entry .etime { font-size: 11.5px; color: var(--d-muted); flex: none; width: 58px; text-align: right; }
+  .entry .flag { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--d-border); color: var(--d-muted); }
+  .entry .flag.bad { color: var(--critical); border-color: var(--critical); }
+  .entry .flag.ok { color: var(--good); border-color: var(--good); }
+  .openwork { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
+  .entry .flag.warn { color: var(--warn); border-color: var(--warn); }
+  .entry.old { opacity: 0.62; }
+  .entry.old:hover { opacity: 1; }
+  .entry.new { box-shadow: inset 3px 0 0 var(--new); }
+  .entry .newtag { color: var(--new); font-weight: 600; }
+  .since {
+    margin-bottom: 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: var(--d-surface); border: 1px solid var(--d-border); border-radius: 10px;
+    padding: 11px 14px; font-size: 13.5px; color: var(--d-ink2);
+  }
+  .since b { color: var(--d-ink); font-weight: 600; }
+  .since button {
+    margin-left: auto; border: 1px solid var(--d-border); background: none; color: var(--d-ink2);
+    font-family: inherit; font-size: 12px; padding: 5px 11px; border-radius: 99px; cursor: pointer;
+    min-height: 30px;
+  }
+  .since button:hover { color: var(--d-ink); }
+  .cols { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cols .col {
+    font-size: 11.5px; padding: 4px 9px; border-radius: 99px; color: var(--d-ink2);
+    border: 1px solid var(--d-border);
+  }
+  .cols .col b { color: var(--d-ink); font-weight: 600; margin-left: 4px; }
+  .cols .col.zero { color: var(--d-muted); }
+  .cols .col.zero b { color: var(--d-muted); }
+  .dayhead a.more { font-size: 12px; color: var(--d-muted); text-decoration: none; }
+  .dayhead a.more:hover { color: var(--d-ink); }
+
+  /* ------- ship log view: editorial light ------- */
+  .shiplog { max-width: 820px; margin: 0 auto; }
+  .masthead {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    border-bottom: 2px solid var(--l-ink); padding-bottom: 14px; margin-bottom: 24px;
+  }
+  .masthead h2 { font-family: Georgia, 'Times New Roman', serif; font-size: 30px; font-weight: 700; letter-spacing: -0.01em; }
+  .masthead .shipped { margin-left: auto; font-size: 13px; color: var(--l-muted); }
+  .project-log { margin-bottom: 34px; }
+  .plhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .plhead .pldot { width: 10px; height: 10px; border-radius: 50%; flex: none; align-self: center; }
+  .plhead a { font-family: Georgia, 'Times New Roman', serif; font-size: 21px; font-weight: 700; color: var(--l-ink); text-decoration: none; }
+  .plhead a:hover { text-decoration: underline; }
+  .plhead .plcount { margin-left: auto; font-size: 12.5px; color: var(--l-muted); }
+  .pl-spark-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; }
+  .pl-spark-row .span { font-size: 11px; color: var(--l-muted); }
+  .logday { margin: 14px 0 4px; font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--l-muted); font-family: 'Space Grotesk', system-ui, sans-serif; }
+  .logitems { display: flex; flex-direction: column; }
+  .logitem {
+    display: flex; align-items: baseline; gap: 10px; padding: 9px 2px;
+    border-bottom: 1px solid var(--l-grid); text-decoration: none; color: inherit;
+  }
+  .logitem:hover .ltitle { text-decoration: underline; }
+  .logitem .ltitle { font-family: Georgia, 'Times New Roman', serif; font-size: 15.5px; min-width: 0; overflow-wrap: anywhere; }
+  .logitem .ltitle em { color: var(--l-ink2); }
+  .logitem .lref { margin-left: auto; flex: none; font-size: 11.5px; color: var(--l-ink2); }
+  .logitem .ltime { flex: none; font-size: 11.5px; color: var(--l-muted); width: 58px; text-align: right; }
+  .quietday { font-size: 13.5px; color: var(--l-muted); font-style: italic; padding: 6px 2px; }
+
+  #tip {
+    position: fixed; pointer-events: none; z-index: 10; display: none;
+    border-radius: 6px; padding: 4px 8px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  }
+  .view-feed #tip { background: var(--d-surface); border: 1px solid var(--d-border); color: var(--d-ink2); }
+  .view-shiplog #tip { background: var(--l-surface); border: 1px solid var(--l-border); color: var(--l-ink2); }
+  #err { color: var(--critical); font-size: 13.5px; margin-bottom: 14px; display: none; }
+  .empty { font-size: 13.5px; }
+  .view-feed .empty { color: var(--d-muted); }
+
+  /* ------- phone ------- */
+  @media (max-width: 800px) {
+    .wrap { padding: 18px 14px 40px; }
+    header { gap: 10px; }
+    .mark { width: 36px; height: 36px; font-size: 18px; border-radius: 9px; }
+    .titleblock h1 { font-size: 18px; }
+    .tagline, .today-date { display: none; }
+    .layout { flex-direction: column; gap: 20px; }
+    .rail { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .rail .kicker { grid-column: 1 / -1; }
+    .card { padding: 11px 12px 9px; gap: 7px; border-radius: 10px; }
+    .card .cardhead a { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card .when { display: none; }
+    .card .totals { font-size: 10.5px; }
+    .card .totals .span { display: none; }
+    .entry { gap: 10px; padding: 10px 8px; flex-wrap: wrap; }
+    .entry .etitle { white-space: normal; line-height: 1.35; font-size: 13.5px; }
+    .entry .etime { width: auto; }
+    .masthead h2 { font-size: 24px; }
+    .logitem .ltime { display: none; }
+  }
+</style>
+</head>
+<body class="view-feed">
+<div class="wrap">
+  <header>
+    <div class="mark">◆</div>
+    <div class="titleblock">
+      <h1>Dev Feed</h1>
+      <div class="tagline mono">what shipped and what's waiting, across every project</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="today-date mono" id="date"></div>
+    <div class="pill" id="updated-pill"><div class="dot"></div><span class="mono" id="updated">loading…</span></div>
+    <button class="pill" id="filter-pill" hidden></button>
+    <div class="switch" role="tablist" aria-label="View">
+      <button id="btn-feed" class="on" role="tab">Feed</button>
+      <button id="btn-shiplog" role="tab">Ship Log</button>
+    </div>
+  </header>
+  <div id="err"></div>
+  <div id="view-root"></div>
+</div>
+<div id="tip"></div>
+
+<script>
+'use strict';
+const SLOT_DARK  = { 1: '#3987e5', 2: '#d95926', 3: '#199e70', 4: '#c98500',
+                     5: '#9b6fe0', 6: '#d9468f', 7: '#2fa7b8', 8: '#8a9a3a' };
+const SLOT_LIGHT = { 1: '#2a78d6', 2: '#eb6834', 3: '#1baf7a', 4: '#eda100',
+                     5: '#8457d6', 6: '#d23a84', 7: '#1f97a8', 8: '#76872a' };
+const tip = document.getElementById('tip');
+let feed = null;
+let view = 'feed';
+try { view = localStorage.getItem('devfeed-view') === 'shiplog' ? 'shiplog' : 'feed'; } catch (e) {}
+if (location.hash === '#shiplog') view = 'shiplog';
+else if (location.hash === '#feed') view = 'feed';
+const expanded = new Set();
+let filterRepo = null;
+
+function toggleFilter(repo) {
+  filterRepo = filterRepo === repo ? null : repo;
+  render();
+}
+
+function slotColor(slot, light) {
+  const m = light ? SLOT_LIGHT : SLOT_DARK;
+  return m[((slot - 1) % 8) + 1];
+}
+function alpha(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+function rel(ts) {
+  const s = (Date.now() - new Date(ts)) / 1000;
+  if (s < 60) return 'now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  if (s < 7 * 86400) return Math.floor(s / 86400) + 'd ago';
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+function clock(ts) {
+  return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+function dayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function dayLabel(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - date) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return date.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+}
+function dayCounts(items) {
+  const m = items.filter(i => i.type === 'merge').length;
+  const p = items.length - m;
+  const parts = [];
+  if (m) parts.push(m + (m === 1 ? ' merge' : ' merges'));
+  if (p) parts.push(p + (p === 1 ? ' push' : ' pushes'));
+  return parts.join(' · ');
+}
+function mergeIcon(color) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '18'); svg.setAttribute('height', '18'); svg.setAttribute('viewBox', '0 0 18 18');
+  svg.innerHTML =
+    `<circle cx="5" cy="4" r="2.4" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<circle cx="5" cy="14" r="2.4" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<circle cx="13.5" cy="9" r="2.4" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<path d="M 5 6.5 L 5 11.5 M 5 8 C 5 9.5 8 9 11 9" fill="none" stroke="${color}" stroke-width="1.6"/>`;
+  return svg;
+}
+function commitIcon(color) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '18'); svg.setAttribute('height', '18'); svg.setAttribute('viewBox', '0 0 18 18');
+  svg.innerHTML =
+    `<line x1="1" y1="9" x2="5.5" y2="9" stroke="#898781" stroke-width="1.6"/>` +
+    `<line x1="12.5" y1="9" x2="17" y2="9" stroke="#898781" stroke-width="1.6"/>` +
+    `<circle cx="9" cy="9" r="3.2" fill="none" stroke="${color}" stroke-width="1.6"/>`;
+  return svg;
+}
+
+function sparkline(counts, color, spanDays, gridColor) {
+  const H = 40, BW = 12, GAP = 5, PAD = 1;
+  const W = counts.length * (BW + GAP) - GAP + PAD * 2;
+  const max = Math.max(1, ...counts);
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H + 4}`);
+  svg.setAttribute('height', H + 4);
+  svg.classList.add('spark');
+  const total = counts.reduce((a, b) => a + b, 0);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `${total} commits in the last ${spanDays} days`);
+  const base = document.createElementNS(ns, 'line');
+  base.setAttribute('x1', 0); base.setAttribute('x2', W);
+  base.setAttribute('y1', H + 0.5); base.setAttribute('y2', H + 0.5);
+  base.setAttribute('stroke', gridColor);
+  svg.appendChild(base);
+  const clip = document.createElementNS(ns, 'clipPath');
+  const cid = 'c' + Math.random().toString(36).slice(2);
+  clip.setAttribute('id', cid);
+  const cr = document.createElementNS(ns, 'rect');
+  cr.setAttribute('x', 0); cr.setAttribute('y', 0);
+  cr.setAttribute('width', W); cr.setAttribute('height', H);
+  clip.appendChild(cr);
+  svg.appendChild(clip);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  counts.forEach((c, i) => {
+    const day = new Date(today);
+    day.setDate(day.getDate() - (counts.length - 1 - i));
+    if (c > 0) {
+      const h = Math.max(4, (c / max) * (H - 5));
+      const bar = document.createElementNS(ns, 'rect');
+      bar.setAttribute('x', PAD + i * (BW + GAP));
+      bar.setAttribute('y', H - h);
+      bar.setAttribute('width', BW);
+      bar.setAttribute('height', h + 3);
+      bar.setAttribute('rx', 2);
+      bar.setAttribute('fill', color);
+      bar.setAttribute('clip-path', `url(#${cid})`);
+      bar.setAttribute('pointer-events', 'none');
+      svg.appendChild(bar);
+    }
+    const hit = document.createElementNS(ns, 'rect');
+    hit.setAttribute('x', PAD + i * (BW + GAP) - GAP / 2);
+    hit.setAttribute('y', 0);
+    hit.setAttribute('width', BW + GAP);
+    hit.setAttribute('height', H + 4);
+    hit.setAttribute('fill', 'transparent');
+    const label = day.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+      + ' — ' + c + (c === 1 ? ' commit' : ' commits');
+    hit.addEventListener('pointerenter', () => { tip.textContent = label; tip.style.display = 'block'; });
+    hit.addEventListener('pointermove', e => {
+      tip.style.left = Math.min(e.clientX + 12, innerWidth - tip.offsetWidth - 8) + 'px';
+      tip.style.top = (e.clientY - 32) + 'px';
+    });
+    hit.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+    svg.appendChild(hit);
+  });
+  return svg;
+}
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function repoTotals(r) {
+  const commits = r.spark.reduce((a, b) => a + b, 0);
+  const cutoff = Date.now() - feed.spark_days * 86400000;
+  const merges = r.items.filter(i => i.type === 'merge' && new Date(i.ts) >= cutoff).length;
+  const parts = [commits + (commits === 1 ? ' commit' : ' commits')];
+  if (merges) parts.push(merges + (merges === 1 ? ' merge' : ' merges'));
+  const prs = (r.open_prs || []).length;
+  if (prs) parts.push(prs + ' open PR' + (prs === 1 ? '' : 's'));
+  return parts.join(' · ');
+}
+
+/* Open PRs and branches with no PR yet: what needs a look, above what already shipped. */
+function prIcon(color) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '18'); svg.setAttribute('height', '18'); svg.setAttribute('viewBox', '0 0 18 18');
+  svg.innerHTML =
+    `<circle cx="5" cy="4" r="2.4" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<circle cx="5" cy="14" r="2.4" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<circle cx="13" cy="14" r="2.4" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<path d="M 5 6.5 L 5 11.5 M 13 11.5 L 13 6 C 13 4.5 12 4 10.5 4 L 9 4" fill="none" stroke="${color}" stroke-width="1.6"/>`;
+  return svg;
+}
+function openWorkSection(title, rows) {
+  const sec = el('div', 'openwork-sec');
+  const head = el('div', 'dayhead');
+  head.append(el('div', 'kicker mono', title), el('div', 'rule'), el('div', 'count mono', String(rows.length)));
+  const list = el('div', 'entries');
+  for (const row of rows) list.appendChild(row);
+  sec.append(head, list);
+  return sec;
+}
+function openWorkRow(it, icon, verb, flags, refText) {
+  const color = slotColor(it.repo.slot, false);
+  const a = el('a', 'entry' + (isNew(it.newAt || it.ts) ? ' new' : '') + (it.old ? ' old' : ''));
+  a.href = it.url; a.target = '_blank';
+  a.appendChild(icon(color));
+  const body = el('div', 'body');
+  body.appendChild(el('div', 'etitle', it.title));
+  const meta = el('div', 'meta');
+  const pname = el('span', null, it.repo.display);
+  pname.style.color = color; pname.style.fontWeight = '500';
+  meta.append(pname, el('span', 'verb', verb));
+  for (const [text, cls] of flags) meta.appendChild(el('span', 'flag mono' + (cls ? ' ' + cls : ''), text));
+  body.appendChild(meta);
+  a.appendChild(body);
+  const ref = el('span', 'ref mono', refText);
+  ref.style.background = alpha(color, 0.14);
+  a.append(ref, el('span', 'etime mono', it.ts ? rel(it.ts) : ''));
+  return a;
+}
+/* ------- since you last looked ------- */
+// Per device (localStorage). The boundary stays fixed while the page is open,
+// moves to "when you left" once the tab has been hidden for 30 minutes, and
+// "Mark all seen" moves it to now.
+const SEEN_KEY = 'devfeed-seen';
+const AWAY_MS = 30 * 60000;
+function storeSeen() {
+  const now = new Date().toISOString();
+  try { localStorage.setItem(SEEN_KEY, now); } catch (e) {}
+  return now;
+}
+let since = null;
+try { since = localStorage.getItem(SEEN_KEY); } catch (e) {}
+if (!since) since = storeSeen();   // first visit: nothing is "new" yet
+let hiddenAt = null;
+function isNew(ts) { return !!ts && ts > since; }
+function days(ts) { return Math.floor((Date.now() - new Date(ts)) / 86400000); }
+
+const STALE_PR_DAYS = 7, QUIET_BRANCH_DAYS = 3, STUCK_CARD_DAYS = 3;
+
+function repoOf(name) {
+  return feed.repos.find(r => r.repo === name) || { repo: name, display: name.split('/')[1], slot: 8 };
+}
+function sinceBanner() {
+  let merges = 0, pushes = 0, prs = 0, branches = 0, failing = 0;
+  for (const r of feed.repos) {
+    for (const it of r.items) if (isNew(it.ts)) it.type === 'merge' ? merges++ : pushes++;
+    for (const p of r.open_prs || []) {
+      if (isNew(p.opened)) prs++;
+      if (p.checks === 'FAILURE' || p.checks === 'ERROR') failing++;
+    }
+    for (const b of r.branches || []) if (isNew(b.ts)) branches++;
+  }
+  const moved = ((feed.board || {}).cards || []).filter(c => isNew(c.since)).length;
+  const n = (k, one, many) => k + ' ' + (k === 1 ? one : many);
+  const parts = [];
+  if (merges) parts.push(n(merges, 'merge', 'merges'));
+  if (pushes) parts.push(n(pushes, 'push', 'pushes'));
+  if (prs) parts.push(n(prs, 'new PR', 'new PRs'));
+  if (branches) parts.push(n(branches, 'active branch', 'active branches'));
+  if (moved) parts.push(n(moved, 'card moved', 'cards moved'));
+  const box = el('div', 'since');
+  const d = new Date(since);
+  const when = (dayKey(since) === dayKey(new Date().toISOString()) ? 'today ' :
+    d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + ', ') + clock(since);
+  const text = el('span');
+  if (parts.length) {
+    text.append('Since you last looked (' + when + '): ');
+    text.appendChild(el('b', null, parts.join(' · ')));
+  } else {
+    text.append('Nothing new since ' + when + '.');
+  }
+  box.appendChild(text);
+  if (failing) {
+    const f = el('span', null, n(failing, 'PR failing checks', 'PRs failing checks'));
+    f.style.color = 'var(--critical)';
+    box.appendChild(f);
+  }
+  if (parts.length) {
+    const btn = el('button', null, 'Mark all seen');
+    btn.onclick = () => { since = storeSeen(); render(); };
+    box.appendChild(btn);
+  }
+  return box;
+}
+
+/* ------- project board ------- */
+function boardIcon(color) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '18'); svg.setAttribute('height', '18'); svg.setAttribute('viewBox', '0 0 18 18');
+  svg.innerHTML =
+    `<rect x="2" y="3" width="14" height="12" rx="2.5" fill="none" stroke="${color}" stroke-width="1.6"/>` +
+    `<path d="M 7 3 L 7 15 M 11.5 3 L 11.5 15" stroke="${color}" stroke-width="1.4"/>`;
+  return svg;
+}
+function boardSection() {
+  const b = feed.board;
+  if (!b) return null;
+  const cards = b.cards.filter(c => !filterRepo || c.repo === filterRepo);
+  const open = cards.filter(c => c.status !== 'Done');
+  const sec = el('div', 'openwork-sec');
+  const head = el('div', 'dayhead');
+  const link = el('a', 'more mono', 'open board ↗');
+  link.href = b.url; link.target = '_blank';
+  head.append(el('div', 'kicker mono', b.title || 'Board'), el('div', 'rule'), link);
+  const columns = b.columns || [];
+  const active = b.active_columns || [];
+  const cols = el('div', 'cols mono');
+  for (const name of columns) {
+    const k = open.filter(c => c.status === name).length;
+    const chip = el('span', 'col' + (k ? '' : ' zero'), name);
+    chip.appendChild(el('b', null, String(k)));
+    cols.appendChild(chip);
+  }
+  const done = cards.filter(c => c.status === 'Done').length;
+  const chip = el('span', 'col' + (done ? '' : ' zero'), 'Done this week');
+  chip.appendChild(el('b', null, String(done)));
+  cols.appendChild(chip);
+  sec.append(head, cols);
+  // Furthest along first: the board's own column order, read right to left.
+  const order = c => -columns.indexOf(c.status);
+  open.sort((a, b) => (b.needs_human - a.needs_human) || (order(a) - order(b)) ||
+    (b.since || '').localeCompare(a.since || ''));
+  const list = el('div', 'entries');
+  for (const c of open) {
+    const flags = [];
+    if (c.needs_human) flags.push(['needs you', 'bad']);
+    const age = c.since ? days(c.since) : 0;
+    if (active.includes(c.status) && age >= STUCK_CARD_DAYS)
+      flags.push(['stuck ' + age + 'd', 'warn']);
+    if (c.size) flags.push(['size ' + c.size]);
+    const row = openWorkRow({ ...c, ts: c.since || '', repo: repoOf(c.repo) }, boardIcon,
+      c.status + (c.since ? ' since ' + rel(c.since) : ''), flags, c.ref);
+    list.appendChild(row);
+  }
+  sec.appendChild(list);
+  return sec;
+}
+
+function renderOpenWork(timeline) {
+  const prs = [], branches = [];
+  for (const r of feed.repos) {
+    if (filterRepo && r.repo !== filterRepo) continue;
+    for (const p of r.open_prs || []) prs.push({ ...p, repo: r });
+    for (const b of r.branches || []) branches.push({ ...b, repo: r });
+  }
+  const wrap = el('div', 'openwork');
+  const board = boardSection();
+  if (board) wrap.appendChild(board);
+  // Ready-for-review first, drafts last; newest activity first within each.
+  prs.sort((a, b) => (a.draft - b.draft) || b.ts.localeCompare(a.ts));
+  branches.sort((a, b) => b.ts.localeCompare(a.ts));
+  if (prs.length) {
+    wrap.appendChild(openWorkSection('Waiting for review', prs.map(p => {
+      const flags = [];
+      if (p.draft) flags.push(['draft']);
+      if (p.checks === 'FAILURE' || p.checks === 'ERROR') flags.push(['checks failing', 'bad']);
+      else if (p.checks === 'SUCCESS') flags.push(['checks pass', 'ok']);
+      else if (p.checks === 'PENDING') flags.push(['checks running']);
+      if (p.review === 'APPROVED') flags.push(['approved', 'ok']);
+      if (p.review === 'CHANGES_REQUESTED') flags.push(['changes requested', 'bad']);
+      const age = days(p.opened);
+      if (age >= STALE_PR_DAYS) flags.push(['open ' + age + 'd', 'warn']);
+      return openWorkRow({ ...p, newAt: p.opened, old: age >= STALE_PR_DAYS }, prIcon,
+        age >= STALE_PR_DAYS ? 'opened' : 'opened ' + rel(p.opened), flags, p.ref);
+    })));
+  }
+  if (branches.length) {
+    wrap.appendChild(openWorkSection('In progress, no PR yet', branches.map(b => {
+      const age = days(b.ts);
+      const quiet = age >= QUIET_BRANCH_DAYS;
+      return openWorkRow({ ...b, old: quiet }, commitIcon, 'last commit',
+        quiet ? [['quiet ' + age + 'd', 'warn']] : [], b.branch);
+    })));
+  }
+  wrap.appendChild(el('div', 'kicker mono', 'Shipped'));
+  timeline.appendChild(wrap);
+}
+
+/* ------- feed view ------- */
+function renderFeed(root) {
+  root.appendChild(sinceBanner());
+  const layout = el('div', 'layout');
+  const rail = el('div', 'rail');
+  rail.appendChild(el('div', 'kicker mono', 'Projects'));
+  const repos = [...feed.repos].sort((a, b) =>
+    (b.last_activity || '').localeCompare(a.last_activity || ''));
+  for (const r of repos) {
+    const color = slotColor(r.slot, false);
+    const card = el('section', 'card');
+    if (filterRepo) {
+      if (filterRepo === r.repo) card.style.borderColor = color;
+      else card.classList.add('dim');
+    }
+    card.onclick = () => toggleFilter(r.repo);
+    const idbar = el('div', 'idbar'); idbar.style.background = color;
+    const head = el('div', 'cardhead');
+    const name = el('a', null, r.display);
+    name.href = 'https://github.com/' + r.repo; name.target = '_blank';
+    name.onclick = e => e.stopPropagation();
+    const when = el('span', 'when mono', r.last_activity ? rel(r.last_activity) : 'no activity');
+    head.append(name, when);
+    const totals = el('div', 'totals');
+    totals.append(el('span', null, repoTotals(r)), el('span', 'span mono', feed.spark_days + 'd'));
+    card.append(idbar, head, sparkline(r.spark, color, feed.spark_days, '#2c2c2a'), totals);
+    rail.appendChild(card);
+  }
+
+  const timeline = el('div', 'timeline');
+  renderOpenWork(timeline);
+  const all = [];
+  for (const r of feed.repos) {
+    if (filterRepo && r.repo !== filterRepo) continue;
+    for (const it of r.items) all.push({ ...it, repo: r });
+  }
+  all.sort((a, b) => b.ts.localeCompare(a.ts));
+  const shown = all.slice(0, 60);
+  if (!shown.length) timeline.appendChild(el('p', 'empty', 'Nothing in the last ' + feed.days + ' days.'));
+  const groups = new Map();
+  for (const it of shown) {
+    const k = dayKey(it.ts);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(it);
+  }
+  let first = true;
+  for (const [k, items] of groups) {
+    const head = el('div', 'dayhead');
+    head.append(el('div', 'kicker mono', dayLabel(k)), el('div', 'rule'), el('div', 'count mono', dayCounts(items)));
+    timeline.appendChild(head);
+    const list = el('div', 'entries');
+    for (const it of items) {
+      const color = slotColor(it.repo.slot, false);
+      const a = el('a', 'entry' + (first ? ' latest' : '') + (isNew(it.ts) ? ' new' : ''));
+      first = false;
+      a.href = it.url; a.target = '_blank';
+      a.appendChild(it.type === 'merge' ? mergeIcon(color) : commitIcon(color));
+      const body = el('div', 'body');
+      body.appendChild(el('div', 'etitle', it.title));
+      const meta = el('div', 'meta');
+      const pname = el('span', null, it.repo.display);
+      pname.style.color = color; pname.style.fontWeight = '500';
+      meta.append(pname, el('span', 'verb', it.type === 'merge' ? 'merged' : 'pushed to main'));
+      body.appendChild(meta);
+      a.appendChild(body);
+      if (it.type === 'merge') {
+        const ref = el('span', 'ref mono', it.ref);
+        ref.style.background = alpha(color, 0.14);
+        a.appendChild(ref);
+      } else {
+        a.appendChild(el('span', 'sha mono', it.ref));
+      }
+      a.appendChild(el('span', 'etime mono', clock(it.ts)));
+      list.appendChild(a);
+    }
+    timeline.appendChild(list);
+  }
+  layout.append(rail, timeline);
+  root.appendChild(layout);
+}
+
+/* ------- ship log view: per-project digest ------- */
+function renderShipLog(root) {
+  const log = el('div', 'shiplog');
+  const mast = el('div', 'masthead');
+  mast.appendChild(el('h2', null, 'The Ship Log'));
+  const todayKey = dayKey(new Date().toISOString());
+  const logRepos = feed.repos.filter(r => !filterRepo || r.repo === filterRepo);
+  let shippedToday = 0;
+  for (const r of logRepos) shippedToday += r.items.filter(i => dayKey(i.ts) === todayKey).length;
+  mast.appendChild(el('div', 'shipped',
+    shippedToday ? shippedToday + ' shipped today' : 'nothing shipped yet today'));
+  log.appendChild(mast);
+
+  const repos = [...logRepos].sort((a, b) =>
+    (b.last_activity || '').localeCompare(a.last_activity || ''));
+  for (const r of repos) {
+    const color = slotColor(r.slot, true);
+    const sec = el('section', 'project-log');
+    const head = el('div', 'plhead');
+    head.style.cursor = 'pointer';
+    head.onclick = () => toggleFilter(r.repo);
+    const dot = el('span', 'pldot'); dot.style.background = color;
+    const name = el('a', null, r.display);
+    name.href = 'https://github.com/' + r.repo; name.target = '_blank';
+    name.onclick = e => e.stopPropagation();
+    head.append(dot, name, el('span', 'plcount', repoTotals(r) + ', last ' + feed.spark_days + ' days'));
+    sec.appendChild(head);
+    const sparkRow = el('div', 'pl-spark-row');
+    const sp = sparkline(r.spark, color, feed.spark_days, '#ddd5c7');
+    sp.style.maxWidth = '250px';
+    sparkRow.append(sp);
+    sec.appendChild(sparkRow);
+
+    if (!r.items.length) {
+      sec.appendChild(el('div', 'quietday', 'Quiet — nothing in the last ' + feed.days + ' days.'));
+      log.appendChild(sec);
+      continue;
+    }
+    const groups = new Map();
+    for (const it of r.items) {
+      const k = dayKey(it.ts);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(it);
+    }
+    const keys = [...groups.keys()];
+    const openAll = expanded.has('log:' + r.repo);
+    const dayLimit = openAll ? keys.length : Math.min(keys.length, 4);
+    for (const k of keys.slice(0, dayLimit)) {
+      sec.appendChild(el('div', 'logday', dayLabel(k)));
+      const list = el('div', 'logitems');
+      for (const it of groups.get(k)) {
+        const a = el('a', 'logitem');
+        a.href = it.url; a.target = '_blank';
+        const t = el('div', 'ltitle');
+        if (it.type === 'merge') { t.textContent = it.title; }
+        else {
+          t.textContent = it.title + ' ';
+          const em = el('em', null, '(push)');
+          t.appendChild(em);
+        }
+        a.appendChild(t);
+        a.appendChild(el('span', 'lref mono', it.ref));
+        a.appendChild(el('span', 'ltime mono', clock(it.ts)));
+        list.appendChild(a);
+      }
+      sec.appendChild(list);
+    }
+    if (keys.length > dayLimit || openAll) {
+      const btn = el('button', null, openAll ? 'fold up' : 'older days');
+      btn.style.cssText = 'border:none;background:none;font-family:inherit;cursor:pointer;font-size:12.5px;color:#8a7f6e;padding:10px 2px 0;';
+      btn.onclick = () => {
+        openAll ? expanded.delete('log:' + r.repo) : expanded.add('log:' + r.repo);
+        render();
+      };
+      sec.appendChild(btn);
+    }
+    log.appendChild(sec);
+  }
+  root.appendChild(log);
+}
+
+/* ------- shell ------- */
+function render() {
+  document.body.className = view === 'shiplog' ? 'view-shiplog' : 'view-feed';
+  document.getElementById('btn-feed').className = view === 'feed' ? 'on' : '';
+  document.getElementById('btn-shiplog').className = view === 'shiplog' ? 'on' : '';
+  document.getElementById('date').textContent =
+    new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  const root = document.getElementById('view-root');
+  root.replaceChildren();
+  if (!feed) return;
+  const fp = document.getElementById('filter-pill');
+  const fr = filterRepo && feed.repos.find(r => r.repo === filterRepo);
+  if (fr) {
+    fp.hidden = false;
+    fp.replaceChildren();
+    const d = el('span', 'dot');
+    d.style.background = slotColor(fr.slot, view === 'shiplog');
+    fp.append(d, el('span', 'mono', fr.display), el('span', 'x', '✕'));
+    fp.onclick = () => toggleFilter(null);
+    fp.setAttribute('aria-label', 'Clear project filter');
+  } else {
+    fp.hidden = true;
+  }
+  const pill = document.getElementById('updated-pill');
+  const age = (Date.now() - new Date(feed.generated_at)) / 60000;
+  document.getElementById('updated').textContent = 'updated ' + rel(feed.generated_at);
+  pill.classList.toggle('stale', age > 4 * (feed.interval_minutes || 5));
+  if (view === 'shiplog') renderShipLog(root); else renderFeed(root);
+}
+
+function setView(v) {
+  view = v;
+  try { localStorage.setItem('devfeed-view', v); } catch (e) {}
+  render();
+}
+document.getElementById('btn-feed').onclick = () => setView('feed');
+document.getElementById('btn-shiplog').onclick = () => setView('shiplog');
+window.addEventListener('hashchange', () => {
+  if (location.hash === '#shiplog') setView('shiplog');
+  else if (location.hash === '#feed') setView('feed');
+});
+
+async function refresh() {
+  try {
+    const res = await fetch('feed.json?_=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    feed = await res.json();
+    document.getElementById('err').style.display = 'none';
+    render();
+  } catch (e) {
+    const err = document.getElementById('err');
+    err.textContent = 'Could not load feed.json — collector may not have run yet. (' + e.message + ')';
+    err.style.display = 'block';
+  }
+}
+render();
+refresh();
+setInterval(refresh, 60000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { storeSeen(); hiddenAt = Date.now(); return; }
+  if (hiddenAt && Date.now() - hiddenAt > AWAY_MS) {
+    try { since = localStorage.getItem(SEEN_KEY) || since; } catch (e) {}
+  }
+  hiddenAt = null;
+  refresh();
+});
+window.addEventListener('pagehide', storeSeen);
+</script>
+</body>
+</html>

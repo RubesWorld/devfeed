@@ -1,0 +1,15 @@
+# Linux: keep devfeed serving (and collecting) in the background.
+# Replace /path/to/devfeed, then:
+#   cp devfeed.service ~/.config/systemd/user/
+#   systemctl --user enable --now devfeed
+[Unit]
+Description=devfeed
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /path/to/devfeed/devfeed.py serve
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target

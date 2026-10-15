@@ -1,0 +1,5 @@
+config.json
+public/feed.json
+public/feed.json.tmp
+__pycache__/
+.DS_Store

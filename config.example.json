@@ -1,0 +1,15 @@
+{
+  "owner": "your-github-username",
+  "bind": "127.0.0.1",
+  "port": 8300,
+  "interval_minutes": 5,
+  "days": 30,
+  "spark_days": 14,
+  "active_days": 14,
+  "hide": [],
+  "ignore_branches": [],
+  "board": null,
+  "repos": [
+    { "repo": "your-github-username/main-project", "display": "Main Project", "slot": 1, "pin": true }
+  ]
+}

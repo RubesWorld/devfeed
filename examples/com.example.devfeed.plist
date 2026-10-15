@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS: keep devfeed serving (and collecting) in the background.
+         Replace /path/to/devfeed, copy to ~/Library/LaunchAgents/, then:
+         launchctl load ~/Library/LaunchAgents/com.example.devfeed.plist -->
+    <key>Label</key>
+    <string>com.example.devfeed</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/path/to/devfeed/devfeed.py</string>
+        <string>serve</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- If the bind address isn't up yet at boot (a VPN IP, say), retry every minute. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <!-- launchd's PATH is minimal; gh usually lives in Homebrew's bin. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardErrorPath</key>
+    <string>/tmp/devfeed.log</string>
+</dict>
+</plist>
