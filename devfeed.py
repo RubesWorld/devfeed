@@ -453,7 +453,7 @@ def demo_feed():
                         "labels": [{"name": ln, "color": lc} for ln, lc in labels]}
                        for t, r, n, st, h, nh, labels in cards]}
     return {"generated_at": ago(0), "interval_minutes": 5, "spark_days": 14, "days": 30,
-            "repos": repos, "board": board}
+            "repos": repos, "board": board, "demo": True}
 
 
 class Server(http.server.ThreadingHTTPServer):

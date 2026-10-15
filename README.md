@@ -23,7 +23,8 @@ you last looked.
 
 ## Try it
 
-No GitHub needed, just Python 3.9+:
+**[Live demo](https://rubesworld.github.io/devfeed/)**, with made-up projects. Or run the
+demo yourself; no GitHub needed, just Python 3.9+:
 
 ```sh
 git clone https://github.com/RubesWorld/devfeed && cd devfeed

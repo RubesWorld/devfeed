@@ -224,7 +224,7 @@
     <div class="mark">◆</div>
     <div class="titleblock">
       <h1>Dev Feed</h1>
-      <div class="tagline mono">what shipped and what's waiting, across every project</div>
+      <div class="tagline mono" id="tagline">what shipped and what's waiting, across every project</div>
     </div>
     <div class="spacer"></div>
     <div class="today-date mono" id="date"></div>
@@ -463,6 +463,7 @@ function storeSeen() {
 }
 let since = null;
 try { since = localStorage.getItem(SEEN_KEY); } catch (e) {}
+const firstVisit = !since;
 if (!since) since = storeSeen();   // first visit: nothing is "new" yet
 let hiddenAt = null;
 function isNew(ts) { return !!ts && ts > since; }
@@ -822,11 +823,40 @@ window.addEventListener('hashchange', () => {
   else if (location.hash === '#feed') setView('feed');
 });
 
+// Demo data (devfeed.py demo, or the hosted demo): say so, link to the repo, and on a
+// first visit start "since you last looked" half a day back so there's something to see.
+function showDemo() {
+  const t = document.getElementById('tagline');
+  t.replaceChildren('demo data · ');
+  const a = el('a', null, 'run it on your own repos ↗');
+  a.href = 'https://github.com/RubesWorld/devfeed'; a.target = '_blank';
+  a.style.color = 'inherit';
+  t.appendChild(a);
+  if (firstVisit) since = new Date(Date.now() - 12 * 3600000).toISOString();
+}
+
+// The hosted demo is built once a day; move its timestamps up to now so it never looks stale.
+function freshen(f) {
+  const shift = Date.now() - new Date(f.generated_at);
+  const move = ts => ts ? new Date(new Date(ts).getTime() + shift).toISOString().replace(/\.\d+Z$/, 'Z') : ts;
+  const keys = ['ts', 'opened', 'since', 'last_activity', 'generated_at'];
+  (function walk(o) {
+    if (Array.isArray(o)) o.forEach(walk);
+    else if (o && typeof o === 'object')
+      for (const k in o) keys.includes(k) && typeof o[k] === 'string' ? o[k] = move(o[k]) : walk(o[k]);
+  })(f);
+}
+
 async function refresh() {
   try {
     const res = await fetch('feed.json?_=' + Date.now());
     if (!res.ok) throw new Error('HTTP ' + res.status);
+    const wasLoaded = !!feed;
     feed = await res.json();
+    if (feed.demo) {
+      freshen(feed);
+      if (!wasLoaded) showDemo();
+    }
     document.getElementById('err').style.display = 'none';
     render();
   } catch (e) {
