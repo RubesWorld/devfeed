@@ -26,6 +26,7 @@ import functools
 import http.server
 import json
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -56,6 +57,8 @@ MAX_ITEMS_PER_REPO = 30
 SLOTS = 8                 # colour slots in index.html
 BRANCH_DAYS = 7           # a branch with no commit for this long is not "in progress"
 BOARD_DONE_DAYS = 7       # Done cards older than this are history, not context
+MAX_BOARD_CARDS = 500     # pages of 100 fetched until this many cards
+SIZE_ORDER = ["xs", "s", "m", "l", "xl"]
 
 
 def log(msg):
@@ -222,7 +225,7 @@ def fetch_open_work(repo, ignored_branches):
 
 
 BOARD_QUERY = """
-query($owner: String!, $number: Int!) {
+query($owner: String!, $number: Int!, $after: String) {
   repositoryOwner(login: $owner) {
     ... on ProjectV2Owner {
       projectV2(number: $number) {
@@ -230,14 +233,15 @@ query($owner: String!, $number: Int!) {
         field(name: "Status") {
           ... on ProjectV2SingleSelectField { options { name } }
         }
-        items(first: 100) {
+        items(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             status: fieldValueByName(name: "Status") {
               ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
             }
             content {
               ... on Issue {
-                number title url state
+                number title url state body
                 repository { nameWithOwner }
                 labels(first: 20) { nodes { name color } }
               }
@@ -255,12 +259,23 @@ def fetch_board(board):
     """A GitHub Projects board: every card not Done, plus cards Done in the last
     week. `since` is when the card moved into its current column, which is what
     "moved since you last looked" and "stuck in progress" are measured from."""
-    data = gh("api", "graphql", "-f", f"query={BOARD_QUERY}",
-              "-F", f"owner={board['owner']}", "-F", f"number={board['number']}")
-    project = (data["data"]["repositoryOwner"] or {}).get("projectV2")
-    if not project:
-        raise RuntimeError(f"board {board['owner']}#{board['number']} not found "
-                           "(gh needs the read:project scope: gh auth refresh -s read:project)")
+    nodes, after = [], None
+    while True:
+        args = ["api", "graphql", "-f", f"query={BOARD_QUERY}",
+                "-F", f"owner={board['owner']}", "-F", f"number={board['number']}"]
+        if after:
+            args += ["-f", f"after={after}"]
+        data = gh(*args)
+        project = (data["data"]["repositoryOwner"] or {}).get("projectV2")
+        if not project:
+            raise RuntimeError(f"board {board['owner']}#{board['number']} not found "
+                               "(gh needs the read:project scope: gh auth refresh -s read:project)")
+        page = project["items"]
+        nodes += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"] or len(nodes) >= MAX_BOARD_CARDS:
+            break
+        after = page["pageInfo"]["endCursor"]
+    nu = board.get("next_up") or {}
     done = board.get("done_column", "Done")
     attention = board.get("attention_label", "needs-human")
     hidden_labels = set(board.get("hide_labels", []))
@@ -268,7 +283,7 @@ def fetch_board(board):
                if o["name"] != done]
     cutoff = utc_cutoff(BOARD_DONE_DAYS)
     cards = []
-    for item in project["items"]["nodes"]:
+    for item in nodes:
         c, st = item["content"], item["status"]
         if not c or not c.get("number"):      # draft notes and PR cards: not tracked here
             continue
@@ -277,6 +292,11 @@ def fetch_board(board):
         if status == done and (since or "") < cutoff:
             continue
         labels = c["labels"]["nodes"]
+        repo = c["repository"]["nameWithOwner"]
+        body = c.get("body") or ""
+        touches = parse_paths(section(body, nu.get("touches_heading", "Touches")))
+        listed = bool(touches)
+        touches = touches or mentioned_paths(body)
         cards.append({
             "title": c["title"].strip(),
             "url": c["url"],
@@ -290,14 +310,176 @@ def fetch_board(board):
             # is shown as "needs you" instead, so it isn't repeated here.
             "labels": [{"name": l["name"], "color": l["color"]} for l in labels
                        if l["name"] != attention and l["name"] not in hidden_labels],
+            # From the issue body, for next_up(): which cards this one builds on,
+            # and which files it changes.
+            "depends_on": parse_refs(section(body, nu.get("depends_heading", "Depends on")), repo),
+            "touches": touches,
+            "touches_listed": listed,
+            "held": any(l["name"] == attention or held_label(l["name"], nu) for l in labels),
+            "size": next((l["name"][len(nu.get("size_prefix", "size:")):] for l in labels
+                          if l["name"].startswith(nu.get("size_prefix", "size:"))), None),
         })
     return {
         "title": board.get("title") or project["title"],
         "url": project["url"],
         "columns": columns,
         "active_columns": board.get("active_columns", columns[-2:]),
+        "count_only_columns": board.get("count_only_columns", []),
         "cards": cards,
     }
+
+
+# ------------------------------------------------------------------ next up
+# Feature priority is the owner's call (the order of the board's columns says
+# it). What the board doesn't show is structure: which card others stand on,
+# and which cards will collide. next_up() answers "what should go next so the
+# rest gets easier", per repo, from two optional sections in each issue body:
+#
+#   ## Depends on            ## Touches
+#   - #12: needs its table   - `src/db/schema.ts`
+#                            - `src/app/connect/`
+
+def section(body, heading):
+    """The lines under `## <heading>` in a markdown body, up to the next heading."""
+    m = re.search(r"^#{2,3}\s*" + re.escape(heading) + r"\s*$(.*?)(?=^#{1,3}\s|\Z)",
+                  body, re.M | re.S | re.I)
+    return m.group(1) if m else ""
+
+
+def parse_refs(text, repo):
+    """`#12`, `owner/name#12` -> ["owner/name#12", ...], in order, no duplicates."""
+    refs = []
+    for owner_repo, n in re.findall(r"(?:([\w.-]+/[\w.-]+))?#(\d+)", text):
+        ref = f"{owner_repo or repo}#{n}"
+        if ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def parse_paths(text):
+    """One path per bullet: the first `backticked` span, else the first word."""
+    paths = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith(("-", "*")):
+            continue
+        line = line[1:].strip()
+        m = re.search(r"`([^`]+)`", line)
+        p = (m.group(1) if m else (line.split() or [""])[0]).strip().lstrip("./")
+        if p and p.lower() != "none" and ("/" in p or "." in p) and p not in paths:
+            paths.append(p)
+    return paths
+
+
+def mentioned_paths(body):
+    """Fallback for issues without a Touches section: `backticked` spans that
+    look like repo paths (have a slash), minus URLs and :line suffixes."""
+    paths = []
+    for span in re.findall(r"`([^`\s]+)`", body):
+        p = re.sub(r":\d+(-\d+)?$", "", span).lstrip("./")
+        if ("/" in p and "://" not in span and re.fullmatch(r"[\w.\-/\[\]]+", p)
+                and p not in paths):
+            paths.append(p)
+    return paths
+
+
+def held_label(name, nu):
+    """hold_labels entries ending in ':' match as a prefix (`risk:` holds `risk:auth`)."""
+    return any(name.startswith(h) if h.endswith(":") else name == h
+               for h in nu.get("hold_labels", []))
+
+
+def overlaps(a, b, nested):
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or (nested and (a.startswith(b + "/") or b.startswith(a + "/")))
+
+
+def shared_paths(x, y):
+    """Paths both cards change. A directory covers the files under it only when
+    both cards list it under Touches; paths guessed from the body (a passing
+    mention of `src/app/`) only count when they're the same file."""
+    nested = x.get("touches_listed") and y.get("touches_listed")
+    return [p for p in x["touches"] if any(overlaps(p, q, nested) for q in y["touches"])]
+
+
+def next_up(board, cfg_board):
+    """Per repo: the card to build next and why, cards waiting on unfinished
+    work, held cards that others wait on, and pairs that shouldn't be built at
+    the same time because they change the same files."""
+    nu = cfg_board.get("next_up") or {}
+    columns, active = board["columns"], board["active_columns"]
+    first_active = min((columns.index(c) for c in active if c in columns), default=len(columns))
+    candidates_cols = nu.get("columns") or columns[max(first_active - 1, 0):first_active]
+    key = lambda c: c["repo"] + c["ref"]
+    open_cards = {key(c): c for c in board["cards"] if c["status"] != "Done" and not c["closed"]}
+
+    dependents = {}
+    for c in open_cards.values():
+        for d in c["depends_on"]:
+            dependents.setdefault(d, []).append(key(c))
+
+    def unblocks(k):
+        seen, todo = [], list(dependents.get(k, []))
+        while todo:
+            n = todo.pop(0)
+            if n not in seen and n != k:
+                seen.append(n)
+                todo += dependents.get(n, [])
+        return seen
+
+    def short(k, repo):
+        return k[len(repo):] if k.startswith(repo + "#") else k
+
+    def brief(c):
+        return {"ref": c["ref"], "title": c["title"], "url": c["url"], "status": c["status"]}
+
+    out = []
+    for repo in sorted({c["repo"] for c in open_cards.values()}):
+        cards = [c for c in open_cards.values() if c["repo"] == repo]
+        cands = [c for c in cards if c["status"] in candidates_cols]
+        ready, waiting, held = [], [], []
+        for c in cands:
+            blockers = [d for d in c["depends_on"] if d in open_cards]
+            row = dict(brief(c), unblocks=[short(k, repo) for k in unblocks(key(c))],
+                       shares=[], blocked_by=[short(d, repo) for d in blockers])
+            for other in cards:
+                if other is not c and shared_paths(c, other):
+                    row["shares"].append({"ref": short(key(other), repo),
+                                          "paths": shared_paths(c, other)})
+            size = c.get("size")
+            row["_rank"] = (-len(row["unblocks"]), -len(row["shares"]),
+                            SIZE_ORDER.index(size) if size in SIZE_ORDER else 2,
+                            -columns.index(c["status"]), c.get("since") or "")
+            (waiting if blockers else held if c["held"] else ready).append(row)
+        for rows in (ready, held):
+            rows.sort(key=lambda r: r["_rank"])
+
+        # Pairs in candidate or active columns changing the same files, unless
+        # one already builds on the other (then the order is decided).
+        busy = [c for c in cards if c["status"] in candidates_cols or c["status"] in active]
+        conflicts = []
+        for i, x in enumerate(busy):
+            for y in busy[i + 1:]:
+                if key(y) in x["depends_on"] or key(x) in y["depends_on"]:
+                    continue
+                paths = shared_paths(x, y)
+                if paths:
+                    conflicts.append({"a": brief(x), "b": brief(y), "paths": paths})
+
+        top = ready[0]["ref"] if ready else None
+        conflicts.sort(key=lambda p: top not in (p["a"]["ref"], p["b"]["ref"]))
+        for r in ready + held + waiting:
+            r.pop("_rank", None)
+        if ready or waiting or conflicts or any(h["unblocks"] for h in held):
+            out.append({
+                "repo": repo,
+                "build_next": ready[0] if ready else None,
+                "then": [{"ref": r["ref"], "title": r["title"]} for r in ready[1:3]],
+                "needs_you": [h for h in held if h["unblocks"]][:2],
+                "waiting": waiting[:3],
+                "conflicts": conflicts[:3],
+            })
+    return out
 
 
 def discover(cfg):
@@ -364,6 +546,8 @@ def collect(cfg):
         "repos": repos_out,
         "board": fetch_board(cfg["board"]) if cfg.get("board") else None,
     }
+    if feed["board"]:
+        feed["next_up"] = next_up(feed["board"], cfg["board"])
     os.makedirs(PUBLIC, exist_ok=True)
     tmp = OUT_PATH + ".tmp"
     with open(tmp, "w") as f:
@@ -431,9 +615,22 @@ def demo_feed():
                       "last_activity": its[0]["ts"], "spark": spark, "items": its,
                       "open_prs": open_prs, "branches": brs})
     feature, bug, grey = ("feature", "a2eeef"), ("bug", "d73a4a"), "ededed"
+    # (depends on, touches) per card, for Next up.
+    structure = {
+        "#150": ([], ["src/checkout/"]),
+        "#151": ([], ["src/checkout/", "src/db/schema.ts"]),
+        "#152": (["acme/storefront#151"], ["src/orders/"]),
+        "#153": (["acme/storefront#151"], ["src/account/credit.tsx"]),
+        "#62": ([], ["src/lists/"]),
+        "#61": (["acme/mobile#62"], ["src/widgets/"]),
+    }
     cards = [
         ("Gift cards at checkout", "acme/storefront", "#150", "In Progress", 90, False,
          [feature, ("size:m", grey), ("payments", "fbca04")]),
+        ("Saved payment methods", "acme/storefront", "#151", "Ready", 20, False,
+         [feature, ("size:s", grey), ("payments", "fbca04")]),
+        ("One-click reorder", "acme/storefront", "#152", "Inbox", 60, False, [feature]),
+        ("Pay with store credit", "acme/storefront", "#153", "Inbox", 70, False, [feature]),
         ("Product reviews with photos", "acme/storefront", "#144", "Review", 30, False,
          [feature, ("size:l", grey)]),
         ("Decide on a search provider", "acme/api", "#309", "Ready", 40, True,
@@ -450,10 +647,14 @@ def demo_feed():
              "cards": [{"title": t, "url": f"https://github.com/{r}/issues/{n[1:]}", "repo": r,
                         "ref": n, "status": st, "since": ago(h), "closed": st == "Done",
                         "needs_human": nh,
-                        "labels": [{"name": ln, "color": lc} for ln, lc in labels]}
+                        "labels": [{"name": ln, "color": lc} for ln, lc in labels],
+                        "depends_on": structure.get(n, ([], []))[0],
+                        "touches": structure.get(n, ([], []))[1],
+                        "touches_listed": n in structure, "held": nh,
+                        "size": next((ln[5:] for ln, _ in labels if ln.startswith("size:")), None)}
                        for t, r, n, st, h, nh, labels in cards]}
     return {"generated_at": ago(0), "interval_minutes": 5, "spark_days": 14, "days": 30,
-            "repos": repos, "board": board, "demo": True}
+            "repos": repos, "board": board, "next_up": next_up(board, {}), "demo": True}
 
 
 class Server(http.server.ThreadingHTTPServer):

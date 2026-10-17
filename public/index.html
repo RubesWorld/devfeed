@@ -116,12 +116,12 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .entry.latest .etitle { color: var(--d-ink); }
-  .entry .meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .entry .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 11.5px; min-width: 0; }
   .entry .meta .verb { color: var(--d-muted); }
   .entry .ref { font-size: 11.5px; padding: 3px 8px; border-radius: 6px; color: var(--d-ink2); flex: none; }
   .entry .sha { font-size: 11.5px; color: var(--d-muted); flex: none; }
   .entry .etime { font-size: 11.5px; color: var(--d-muted); flex: none; width: 58px; text-align: right; }
-  .entry .flag { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--d-border); color: var(--d-muted); }
+  .entry .flag { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--d-border); color: var(--d-muted); overflow-wrap: anywhere; }
   .entry .flag.bad { color: var(--critical); border-color: var(--critical); }
   .entry .flag.ok { color: var(--good); border-color: var(--good); }
   .openwork { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
@@ -533,6 +533,7 @@ function boardSection() {
   if (!b) return null;
   const cards = b.cards.filter(c => !filterRepo || c.repo === filterRepo);
   const open = cards.filter(c => c.status !== 'Done');
+  const countOnly = b.count_only_columns || [];   // e.g. a Backlog: counted, not listed
   const sec = el('div', 'openwork-sec');
   const head = el('div', 'dayhead');
   const link = el('a', 'more mono', 'open board ↗');
@@ -558,6 +559,7 @@ function boardSection() {
     (b.since || '').localeCompare(a.since || ''));
   const list = el('div', 'entries');
   for (const c of open) {
+    if (countOnly.includes(c.status)) continue;
     const flags = [];
     if (c.needs_human) flags.push(['needs you', 'bad']);
     const age = c.since ? days(c.since) : 0;
@@ -579,6 +581,53 @@ function boardSection() {
   return sec;
 }
 
+/* ------- next up ------- */
+// Which card to build next so the rest gets easier: what it unblocks, what it
+// shares files with, and pairs that shouldn't be built at the same time.
+function nextIcon(color) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '18'); svg.setAttribute('height', '18'); svg.setAttribute('viewBox', '0 0 18 18');
+  svg.innerHTML =
+    `<path d="M 3 9 L 14 9 M 10 5 L 14 9 L 10 13" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`;
+  return svg;
+}
+function refList(refs) {
+  return refs.length > 3 ? refs.slice(0, 3).join(', ') + ' +' + (refs.length - 3) : refs.join(', ');
+}
+function nextUpSection() {
+  const rows = [];
+  for (const n of feed.next_up || []) {
+    if (filterRepo && n.repo !== filterRepo) continue;
+    const repo = repoOf(n.repo);
+    const c = n.build_next;
+    if (c) {
+      const flags = [];
+      if (c.unblocks.length) flags.push(['unblocks ' + refList(c.unblocks), 'ok']);
+      for (const sh of c.shares.slice(0, 2)) flags.push(['shares ' + sh.paths[0] + ' with ' + sh.ref]);
+      if (!flags.length) flags.push(['no blockers']);
+      if (n.then.length) flags.push(['then ' + n.then.map(t => t.ref).join(', '), null, null,
+        n.then.map(t => t.ref + ' ' + t.title).join('\n')]);
+      rows.push(openWorkRow({ ...c, ts: '', repo }, nextIcon, 'build next · ' + c.status, flags, c.ref));
+    }
+    for (const h of n.needs_you) {
+      rows.push(openWorkRow({ ...h, ts: '', repo }, nextIcon, 'held · ' + h.status,
+        [['needs you', 'bad'], ['blocks ' + refList(h.unblocks), 'warn']], h.ref));
+    }
+    for (const p of n.conflicts) {
+      const title = p.a.ref + ' ' + p.a.title + '  ·  ' + p.b.ref + ' ' + p.b.title;
+      rows.push(openWorkRow({ title, url: p.a.url, ts: '', repo }, nextIcon,
+        "don't build together", [['both change ' + p.paths[0], 'warn', null, p.paths.join('\n')]],
+        p.a.ref + '+' + p.b.ref));
+    }
+    for (const w of n.waiting) {
+      rows.push(openWorkRow({ ...w, ts: '', repo, old: true }, nextIcon, 'waiting · ' + w.status,
+        [['waits on ' + refList(w.blocked_by)]], w.ref));
+    }
+  }
+  return rows.length ? openWorkSection('Next up', rows) : null;
+}
+
 function renderOpenWork(timeline) {
   const prs = [], branches = [];
   for (const r of feed.repos) {
@@ -587,6 +636,8 @@ function renderOpenWork(timeline) {
     for (const b of r.branches || []) branches.push({ ...b, repo: r });
   }
   const wrap = el('div', 'openwork');
+  const next = nextUpSection();
+  if (next) wrap.appendChild(next);
   // Ready-for-review first, drafts last; newest activity first within each.
   prs.sort((a, b) => (a.draft - b.draft) || b.ts.localeCompare(a.ts));
   branches.sort((a, b) => b.ts.localeCompare(a.ts));

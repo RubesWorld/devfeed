@@ -17,6 +17,9 @@ you last looked.
   with your attention label (`needs-human` by default) on top.
 - **Repos find themselves.** Every non-archived repo you've pushed to in the last two
   weeks shows up, most recent first, and drops off when it goes quiet. Nothing to list.
+- **Next up.** Per repo, which board card to build next so the rest gets easier: what
+  it unblocks, which files it shares with other cards, and which cards shouldn't be
+  built at the same time. Structure, not feature priority. See below.
 - **Ship Log.** A second, calmer view: everything shipped, by project and day.
 
 ![The Ship Log view](docs/shiplog.png)
@@ -79,7 +82,9 @@ for macOS, a systemd unit for Linux, and a cron line if you'd rather serve
 Columns come from the board's own `Status` field, in order. Optional keys: `title`
 (defaults to the board's name), `done_column` (`"Done"`), `active_columns` (which
 columns count as "in progress" for the stuck flag; defaults to the last two before
-Done), `attention_label` (`"needs-human"`) and `hide_labels` (`[]`). Reading a board needs the
+Done), `count_only_columns` (`[]`; columns like a Backlog that get a count chip but
+no rows), `attention_label` (`"needs-human"`), `hide_labels` (`[]`) and `next_up`
+(below). Reading a board needs the
 `read:project` scope: `gh auth refresh -s read:project`.
 
 Each card shows the issue's own labels in their GitHub colours, up to three, with the
@@ -93,13 +98,56 @@ card at the top, marked "needs you". To keep a noisy label off the cards, list i
 
 Only issues are shown; draft notes and PR cards on the board are skipped.
 
+### Next up
+
+The order of your columns says what matters most. What a board doesn't show is
+structure: which card others are waiting on, and which cards will collide because
+they change the same files. Next up reads two optional sections from each issue body:
+
+```markdown
+## Depends on
+- #12: needs the table it adds
+- other-repo#3
+
+## Touches
+- `src/db/schema.ts`
+- `src/app/connect/`
+```
+
+Per repo it recommends one card from the candidate columns, ranked by:
+
+1. **Unblocks the most**: cards that depend on it, directly or down a chain.
+2. **Shares the most**: a card changing files many others also change is groundwork;
+   building it first means the rest build on it once instead of colliding.
+3. **Smaller first** on ties (`size:xs` … `size:xl` labels), then further right on the
+   board, then oldest.
+
+A card whose dependencies are still open is listed as waiting, never recommended. A
+card with your `attention_label` or a `hold_labels` label is never recommended either;
+if others wait on it, it's shown as "needs you". Pairs in the candidate or active
+columns that change the same files are flagged "don't build together", unless one
+already depends on the other.
+
+Without a `## Touches` section, file paths in backticks anywhere in the body are used
+instead, and those only count as shared when it's the exact same file.
+
+```json
+"board": { "owner": "you", "number": 1,
+  "next_up": { "columns": ["Ready"], "hold_labels": ["risk:", "blocked"] } }
+```
+
+`next_up` keys, all optional: `columns` (candidate columns; defaults to the one just
+before `active_columns`), `hold_labels` (a trailing `:` matches as a prefix, so `risk:`
+holds `risk:auth`), `depends_heading` (`"Depends on"`), `touches_heading` (`"Touches"`)
+and `size_prefix` (`"size:"`).
+
 ## Limits
 
 devfeed is built for one person's or one small team's repos, not a large org:
 
 - Up to 200 repos per owner are considered (most recently pushed first).
 - Per repo: the latest 60 commits, 20 recently closed PRs, 20 open PRs and 20 branches.
-- The first 100 cards on the board.
+- The first 500 cards on the board.
 
 Each repo costs about three GitHub API calls per run, so 20 active repos at the default
 5-minute interval use about 15% of GitHub's hourly limit.
