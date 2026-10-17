@@ -17,6 +17,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Compile
         run: python -m py_compile devfeed.py
+      - name: Unit tests
+        run: python -m unittest discover tests
       - name: Page script parses
         run: |
           python - <<'PY' > page.js
@@ -30,7 +32,7 @@ jobs:
           python devfeed.py demo --port 8399 &
           for i in $(seq 1 20); do curl -sf http://127.0.0.1:8399/ > /dev/null && break; sleep 0.5; done
           curl -sf -D - -o /dev/null http://127.0.0.1:8399/index.html | grep -i "cache-control: no-cache"
-          curl -sf http://127.0.0.1:8399/feed.json | python -c "import json, sys; f = json.load(sys.stdin); assert f['repos'] and f['board']['cards']"
+          curl -sf http://127.0.0.1:8399/feed.json | python -c "import json, sys; f = json.load(sys.stdin); assert f['repos'] and f['board']['cards'] and f['next_up']"
       - name: Missing config fails cleanly
         run: |
           if python devfeed.py collect --config nope.json; then exit 1; fi
