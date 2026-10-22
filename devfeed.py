@@ -497,8 +497,13 @@ def discover(cfg):
     cutoff = utc_cutoff(cfg["active_days"])
     pushed = {}
     for owner in cfg["owners"]:
-        for r in gh("repo", "list", owner, "--limit", "200", "--no-archived", "--source",
-                    "--json", "nameWithOwner,pushedAt"):
+        listed = gh("repo", "list", owner, "--limit", "200", "--no-archived", "--source",
+                    "--json", "nameWithOwner,pushedAt")
+        # GitHub sometimes answers with an empty list instead of an error. Treat
+        # it as a failed fetch, or pins alone would replace a good feed.
+        if not listed:
+            raise RuntimeError(f"gh repo list {owner}: no repos returned; keeping the previous feed")
+        for r in listed:
             pushed[r["nameWithOwner"]] = r["pushedAt"]
     names = {n for n, ts in pushed.items() if ts and ts >= cutoff}
     names |= {n for n, o in overrides.items() if o.get("pin")}
