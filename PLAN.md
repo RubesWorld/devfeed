@@ -29,6 +29,7 @@ The first real digest arrived as one long column of plain text, with every link 
 - [ ] The sent message is `multipart/alternative` (text/plain, then text/html, both UTF-8), with the same headers as before. `digest --demo --html` and `digest --dry-run --html` print the HTML. `--html` on a real send exits 1 with a one-line message.
 
 ## Edge cases → tests
+- `gh repo list` returns [] for any owner → collect fails, previous feed kept → tests/test_discover.py::Discover.test_empty_listing_raises, test_empty_listing_for_one_owner_raises, test_empty_listing_keeps_previous_feed
 - Titles with `<script>`, `&`, quotes and an `"onmouseover` attempt are escaped in text and attributes → tests/test_digest_html.py::Html.test_escapes_titles_and_attrs
 - A non-https URL in the feed is shown as plain text with no href → tests/test_digest_html.py::Html.test_only_https_links
 - One-line case (nothing waiting) gives a short HTML note, and the stale line comes first → tests/test_digest_html.py::Html.test_one_line_and_stale
@@ -45,8 +46,10 @@ The first real digest arrived as one long column of plain text, with every link 
 - Looks right in real clients → manual: one real send to neburai5@gmail.com, viewed in the Gmail app (light + dark) and on desktop
 
 ## Slices
+- [x] 0. Fix found mid-plan: an empty `gh repo list` for an owner raises, so `collect` keeps the previous feed (on 2026-10-22 13:03 it replaced the live feed with pins only) | files: devfeed.py, tests/test_discover.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests` | [local]
 - [ ] 1. Split `render_digest` into a model builder (`digest_model`) plus a text renderer. Tighten the text: no duplicate Next, "Also active: …" for quiet repos, compact away section. Update the existing render tests to the new text. | files: devfeed.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests && python3 devfeed.py digest --demo` | [local]
 - [ ] 2. `render_digest_html(model)`: escaped, https-only links, table layout, dark mode, phone width. Add the `--html` flag and its checks, and make `build_message` multipart/alternative. Add tests/test_digest_html.py and extend Send.test_message_headers. | files: devfeed.py, tests/test_digest_html.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests && python3 devfeed.py digest --demo --html > /dev/null` | [local]
 - [ ] 3. Docs and CI: the README Digest section (HTML email, `--html` preview tip, optional `digest.page_url`) and a CI smoke step that checks `digest --demo --html` outputs `<!doctype html>` with no `http://` hrefs | files: README.md, .github/workflows/check.yml | done: `python3 -m unittest discover tests && ruby -ryaml -e 'YAML.load_file(".github/workflows/check.yml")'` | [local]
 
 ## Log
+- Slice 0 added at the user's request after the live feed dropped to Nao only (13:03): an empty repo list from GitHub slipped past the fetch-failure check. Built and committed before the HTML slices.
