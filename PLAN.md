@@ -5,12 +5,12 @@ Branch: agent/feat-html-digest · Base: main · Spec: none
 The first real digest arrived as one long column of plain text, with every link on a line of its own and the "Next" line repeating the first waiting item. This change sends the digest as `multipart/alternative`. The new HTML part follows the design picked from the preview: an uppercase repo heading with "N waiting", colored verb tags and titles that are links. The plain-text part stays as a fallback but is cut down in the same way. Standard library only, and it works in `--demo` and `--dry-run`.
 
 ## Done criteria
-- [ ] `render_digest` builds one structured model, which both a text renderer and an HTML renderer read. `render_digest(...)` still returns `(subject, text_body)`, and a new `render_digest_html(...)` returns the HTML.
-- [ ] HTML layout matches the page's dark Feed view, using the same tokens as `public/index.html`:
+- [x] `render_digest` builds one structured model, which both a text renderer and an HTML renderer read. `render_digest(...)` still returns `(subject, text_body)`, and a new `render_digest_html(...)` returns the HTML.
+- [x] HTML layout matches the page's dark Feed view, using the same tokens as `public/index.html`:
   - colors: page `#0d0d0d`, surface `#1a1a19`, border `rgba(255,255,255,.10)`, ink `#fff` / `#c3c2b7`, muted `#898781`
   - fonts: Space Grotesk then the system stack; IBM Plex Mono then `ui-monospace` for the meta text and tags
   - each repo's slot color, from the page's `SLOT_DARK`
-- [ ] HTML content:
+- [x] HTML content:
   - a header with the ◆ mark, "Dev Feed", the date and a "N need you" pill (red when N > 0, green when all clear)
   - one surface card per repo with waiting items: a 3px left bar in the slot color, the repo name with "N waiting" on the right, a "Left off" row, then one row per waiting item
   - each waiting row has a bordered mono tag like the page's pills (`review` blue `#3987e5`, `fix` red `#d03b3b`, `merge` green `#0ca30c`, `needs you` amber `#c98500`, `build` muted), the title as a link, and a `#ref` badge tinted with the slot color
@@ -19,14 +19,14 @@ The first real digest arrived as one long column of plain text, with every link 
   - a compact "While you were away" section
   - no raw URLs in the visible text
   - optional: when `digest.page_url` is set, an "open devfeed ↗" link in the header; it's left out when unset, and `config.example.json` leaves it out
-- [ ] The HTML is email-safe:
+- [x] The HTML is email-safe:
   - tables, inline styles and `bgcolor`, so the dark background survives in Gmail
   - no external CSS, fonts or images
   - `color-scheme: dark` meta, since the email is always dark like the Feed view
   - content at most 600px wide and readable on a phone
   - every title and name escaped, and only `https://` links become hrefs
-- [ ] The text part drops the duplicate Next and collapses quiet repos into "Also active: …". It keeps a URL under each waiting item, so it still works on its own.
-- [ ] The sent message is `multipart/alternative` (text/plain, then text/html, both UTF-8), with the same headers as before. `digest --demo --html` and `digest --dry-run --html` print the HTML. `--html` on a real send exits 1 with a one-line message.
+- [x] The text part drops the duplicate Next and collapses quiet repos into "Also active: …". It keeps a URL under each waiting item, so it still works on its own.
+- [x] The sent message is `multipart/alternative` (text/plain, then text/html, both UTF-8), with the same headers as before. `digest --demo --html` and `digest --dry-run --html` print the HTML. `--html` on a real send exits 1 with a one-line message.
 
 ## Edge cases → tests
 - `gh repo list` returns [] for any owner → collect fails, previous feed kept → tests/test_discover.py::Discover.test_empty_listing_raises, test_empty_listing_for_one_owner_raises, test_empty_listing_keeps_previous_feed
@@ -60,3 +60,4 @@ The first real digest arrived as one long column of plain text, with every link 
 - local-candidate: slice 2 | first-try pass: no | ~410 lines
 - Slice 2 choices: `render_digest_html` takes the same arguments as `render_digest` plus `page_url`, not a model. `digest.page_url` may be http:// because the owner's own page is often on a LAN/Tailscale address; feed links stay https-only. A total cap of 25 away lines (DIGEST_AWAY_TOTAL) applies to text and HTML alike. Chip labels use &nbsp; so they don't wrap.
 - local-candidate: slice 3 | first-try pass: yes | ~20 lines
+- Done criteria verified: 89 tests pass on Python 3.9.6 and 3.14.7; `digest --demo --html` renders (screenshot at phone width checked). Still open: the manual real-client check (send to neburai5@gmail.com, view in the Gmail app).
