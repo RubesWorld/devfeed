@@ -2,22 +2,22 @@
 Branch: agent/feat-3-morning-digest · Base: main · Spec: https://github.com/RubesWorld/devfeed/issues/3
 
 ## Done criteria
-- [ ] `devfeed.py` accepts `digest` with `--dry-run` and `--demo` flags. The argparse choices and the module docstring list it.
-- [ ] A pure function, e.g. `render_digest(feed, since, now)` → `(subject, body)`, holds all the formatting, with no I/O, so tests can call it directly.
-- [ ] Active-repo filter, ordering, Left off / Next / Waiting rules and the fix/merge/review verbs all behave as described above.
-- [ ] The "while you were away" window starts at the stored `last_window_end`, or 24h before the feed's `generated_at` when there is no usable state. It ends at the feed's `generated_at`.
-- [ ] The one-line body applies when nothing is waiting on you.
-- [ ] The message is built with `email.message.EmailMessage`, `text/plain; charset=utf-8`, with `From`, `To`, `Subject`, `Date` and `Message-ID` set.
-- [ ] SMTP: port 465 uses `smtplib.SMTP_SSL`, any other port uses `SMTP` + `starttls()`, then `login`, with a 30s timeout. Defaults are `port` 587 and `from` = `user`. `to` is a string or a list.
-- [ ] Password comes from env `DEVFEED_SMTP_PASSWORD` first, then `digest.smtp.password`. It is never logged or printed, including in exception messages.
-- [ ] `digest-state.json` lives in the same directory as the config file in use (never in `public/`). It is written atomically (tmp + `os.replace`), and only after `send_message` returns without error. It holds `{"last_window_end": "<feed generated_at>", "last_sent_at": "<UTC now>"}`.
-- [ ] `.gitignore` gains `digest-state.json` and `digest-state.json.tmp`.
-- [ ] `config.example.json` gains a `digest` block with placeholder values (`to`, `smtp.host` `smtp.gmail.com`, `port` 587, `user`), no password and `active_days` 7.
-- [ ] Running `digest` (without `--dry-run` or `--demo`) when there is no `digest` block, or `to`, `smtp.host` or `smtp.user` is missing, or no password is available: exit 1 with a one-line message naming the missing key.
-- [ ] `examples/crontab.txt` gains a daily `30 7 * * *` digest line, with a note on setting `DEVFEED_SMTP_PASSWORD` in the crontab. New `examples/com.example.devfeed-digest.plist` uses `StartCalendarInterval` Hour 7 Minute 30, with no Weekday key, so it runs daily.
-- [ ] README gets a Digest section: config, Gmail app password, scheduling, and a warning that the email contains private repo titles.
-- [ ] `tests/test_digest.py` covers: render from `demo_feed()`, the one-line case, the window filter, the verb choice, no-board feed, unicode titles, truncation, the stale-feed first line and state-file read fallbacks.
-- [ ] `python3 -m py_compile devfeed.py && python3 -m unittest discover tests` passes on 3.9 and 3.13.
+- [x] `devfeed.py` accepts `digest` with `--dry-run` and `--demo` flags. The argparse choices and the module docstring list it.
+- [x] A pure function, e.g. `render_digest(feed, since, now)` → `(subject, body)`, holds all the formatting, with no I/O, so tests can call it directly.
+- [x] Active-repo filter, ordering, Left off / Next / Waiting rules and the fix/merge/review verbs all behave as described above.
+- [x] The "while you were away" window starts at the stored `last_window_end`, or 24h before the feed's `generated_at` when there is no usable state. It ends at the feed's `generated_at`.
+- [x] The one-line body applies when nothing is waiting on you.
+- [x] The message is built with `email.message.EmailMessage`, `text/plain; charset=utf-8`, with `From`, `To`, `Subject`, `Date` and `Message-ID` set.
+- [x] SMTP: port 465 uses `smtplib.SMTP_SSL`, any other port uses `SMTP` + `starttls()`, then `login`, with a 30s timeout. Defaults are `port` 587 and `from` = `user`. `to` is a string or a list.
+- [x] Password comes from env `DEVFEED_SMTP_PASSWORD` first, then `digest.smtp.password`. It is never logged or printed, including in exception messages.
+- [x] `digest-state.json` lives in the same directory as the config file in use (never in `public/`). It is written atomically (tmp + `os.replace`), and only after `send_message` returns without error. It holds `{"last_window_end": "<feed generated_at>", "last_sent_at": "<UTC now>"}`.
+- [x] `.gitignore` gains `digest-state.json` and `digest-state.json.tmp`.
+- [x] `config.example.json` gains a `digest` block with placeholder values (`to`, `smtp.host` `smtp.gmail.com`, `port` 587, `user`), no password and `active_days` 7.
+- [x] Running `digest` (without `--dry-run` or `--demo`) when there is no `digest` block, or `to`, `smtp.host` or `smtp.user` is missing, or no password is available: exit 1 with a one-line message naming the missing key.
+- [x] `examples/crontab.txt` gains a daily `30 7 * * *` digest line, with a note on setting `DEVFEED_SMTP_PASSWORD` in the crontab. New `examples/com.example.devfeed-digest.plist` uses `StartCalendarInterval` Hour 7 Minute 30, with no Weekday key, so it runs daily.
+- [x] README gets a Digest section: config, Gmail app password, scheduling, and a warning that the email contains private repo titles.
+- [x] `tests/test_digest.py` covers: render from `demo_feed()`, the one-line case, the window filter, the verb choice, no-board feed, unicode titles, truncation, the stale-feed first line and state-file read fallbacks.
+- [x] `python3 -m py_compile devfeed.py && python3 -m unittest discover tests` passes on 3.9 and 3.13.
 
 ## Edge cases → tests
 - First run / state file missing → window = generated_at − 24h → tests/test_digest.py::State.test_missing_state_falls_back_24h
@@ -56,3 +56,4 @@ Branch: agent/feat-3-morning-digest · Base: main · Spec: https://github.com/Ru
 - local-candidate: slice 2 | first-try pass: yes | ~360 lines
 - Slice 2 choices: `digest` checks the config before collecting, so a missing key fails fast. `--dry-run` reads the state file (for a realistic window) but never writes it. Send errors are logged as `<ExceptionType>: <message>` with the password replaced by `***`.
 - local-candidate: slice 3 | first-try pass: yes | ~95 lines
+- Done criteria verified locally on Python 3.9.6 and 3.14.7; CI runs the 3.9/3.13 matrix on the PR.
