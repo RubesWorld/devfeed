@@ -694,9 +694,9 @@ def pr_verb(p):
     return "review"
 
 
-def render_digest(feed, since, now, active_days=7, stale_hours=None):
-    """The digest email as (subject, body), from a feed and the window start.
-    Pure: no I/O, so the caller decides the window, the clock and staleness."""
+def digest_model(feed, since, now, active_days=7, stale_hours=None):
+    """Everything the digest shows, as plain data, from a feed and the window
+    start. Pure: no I/O. The text and HTML renderers both read this."""
     end = parse_ts(feed["generated_at"])
     active_cutoff = now - timedelta(days=active_days)
     board = feed.get("board") or {}
@@ -705,8 +705,8 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
     def cut(title):
         return title if len(title) <= DIGEST_TITLE else title[:DIGEST_TITLE - 1] + "…"
 
-    def entry(text, url):
-        return [f"  - {text}", f"    {url}"]
+    def row(kind, ref, title, url):
+        return {"kind": kind, "ref": ref, "title": cut(title), "url": url}
 
     def in_window(s):
         return bool(s) and since < parse_ts(s) <= end
@@ -718,7 +718,7 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
 
     def block(name):
         if name not in blocks:
-            r = repos.get(name) or {"repo": name, "display": name.split("/")[-1],
+            r = repos.get(name) or {"repo": name, "display": name.split("/")[-1], "slot": SLOTS,
                                     "last_activity": None, "items": [], "open_prs": [],
                                     "branches": []}
             blocks[name] = {"repo": r, "waiting": [], "away": []}
@@ -729,86 +729,127 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
         b = block(r["repo"])
         for p in r["open_prs"]:
             if not p["draft"]:
-                b["waiting"].append((f"{pr_verb(p)} {p['ref']} {cut(p['title'])}", p["url"]))
+                b["waiting"].append(row(pr_verb(p), p["ref"], p["title"], p["url"]))
         for i in r["items"]:
             if i["type"] == "merge" and in_window(i["ts"]):
-                b["away"].append((i["ts"], f"merged {i['ref']} {cut(i['title'])}", i["url"]))
+                b["away"].append((i["ts"], row("merged", i["ref"], i["title"], i["url"])))
                 counts["merge"] += 1
         for p in r["open_prs"]:
             if in_window(p.get("opened")):
-                b["away"].append((p["opened"], f"new PR {p['ref']} {cut(p['title'])}", p["url"]))
+                b["away"].append((p["opened"], row("new PR", p["ref"], p["title"], p["url"])))
                 counts["pr"] += 1
     for c in board.get("cards") or []:
         if c.get("needs_human") and c["status"] != "Done" and not c["closed"]:
-            block(c["repo"])["waiting"].append((f"{c['ref']} {cut(c['title'])}", c["url"]))
+            block(c["repo"])["waiting"].append(row("issue", c["ref"], c["title"], c["url"]))
         if in_window(c.get("since")):
-            block(c["repo"])["away"].append((c["since"], f"{c['ref']} → {c['status']}", c["url"]))
+            block(c["repo"])["away"].append((c["since"], row("moved", c["ref"], c["status"], c["url"])))
             counts["move"] += 1
 
     waiting_total = sum(len(b["waiting"]) for b in blocks.values())
     day = now.astimezone().strftime("%a %d %b")
-    subject = f"devfeed: {waiting_total} need you · {day}" if waiting_total \
-        else f"devfeed: all clear · {day}"
-    lines = [f"Couldn't refresh from GitHub; this is {stale_hours}h old."] \
-        if stale_hours is not None else []
-    since_s = local_time(since)
-
+    model = {
+        "subject": f"devfeed: {waiting_total} need you · {day}" if waiting_total
+        else f"devfeed: all clear · {day}",
+        "day": day, "since": local_time(since), "stale_hours": stale_hours,
+        "waiting_total": waiting_total, "summary": None,
+        "repos": [], "more_repos": 0, "quiet": [], "more_quiet": 0, "away": [],
+    }
     if not waiting_total:
         if any(counts.values()):
             parts = [f"{counts['merge']} merge{'s' * (counts['merge'] != 1)}",
                      f"{counts['pr']} new PR{'s' * (counts['pr'] != 1)}",
                      f"{counts['move']} board move{'s' * (counts['move'] != 1)}"]
-            lines.append(f"Nothing needs you. Since {since_s}: {', '.join(parts)}.")
+            model["summary"] = f"Nothing needs you. Since {model['since']}: {', '.join(parts)}."
         else:
-            lines.append(f"Nothing needs you, and nothing changed since {since_s}.")
-        return subject, "\n".join(lines) + "\n"
+            model["summary"] = f"Nothing needs you, and nothing changed since {model['since']}."
+        return model
 
     def recent(b):
         return b["repo"]["last_activity"] or ""
+
+    def head(r):
+        return {"repo": r["repo"], "display": r["display"], "slot": r.get("slot") or SLOTS,
+                "url": f"https://github.com/{r['repo']}"}
 
     active = [b for b in blocks.values() if b["waiting"]
               or (b["repo"]["last_activity"] and parse_ts(b["repo"]["last_activity"]) >= active_cutoff)]
     active.sort(key=recent, reverse=True)
     active.sort(key=lambda b: not b["waiting"])
-    if lines:
-        lines.append("")
-    for b in active[:DIGEST_REPOS]:
+    full, quiet = [], []
+    for b in active:
         r = b["repo"]
-        lines.append(f"{r['display']} ({r['repo']})")
+        # Next only when it says something the waiting rows don't: a waiting PR
+        # would just repeat the first row, so it's the build-next card or nothing.
+        bn = build_next.get(r["repo"])
+        nxt = row("build", bn["ref"], bn["title"], bn["url"]) \
+            if bn and not any(not p["draft"] for p in r["open_prs"]) else None
+        if not b["waiting"] and not nxt:
+            quiet.append(head(r))
+            continue
         last = (r["branches"][:1] and r["branches"][0]) or (r["items"][:1] and r["items"][0])
-        if last:
-            where = last.get("branch") or last["ref"]
-            lines += [f"  Left off: {cut(last['title'])} ({where})", f"    {last['url']}"]
-        nxt = next((p for p in r["open_prs"] if not p["draft"]), None)
-        if nxt:
-            lines += [f"  Next: {pr_verb(nxt)} {nxt['ref']} {cut(nxt['title'])}",
-                      f"    {nxt['url']}"]
-        elif r["repo"] in build_next:
-            bn = build_next[r["repo"]]
-            lines += [f"  Next: build {bn['ref']} {cut(bn['title'])}", f"    {bn['url']}"]
-        if b["waiting"]:
-            lines.append("  Waiting on you:")
-            for text, url in b["waiting"][:DIGEST_WAITING]:
-                lines += entry(text, url)
-            if len(b["waiting"]) > DIGEST_WAITING:
-                lines.append(f"  +{len(b['waiting']) - DIGEST_WAITING} more")
-        lines.append("")
-    if len(active) > DIGEST_REPOS:
-        lines += [f"+{len(active) - DIGEST_REPOS} more repos", ""]
+        left_off = {"title": cut(last["title"]), "where": last.get("branch") or last["ref"],
+                    "url": last["url"]} if last else None
+        full.append({**head(r), "left_off": left_off, "next": nxt,
+                     "waiting_count": len(b["waiting"]),
+                     "waiting": b["waiting"][:DIGEST_WAITING],
+                     "more": max(len(b["waiting"]) - DIGEST_WAITING, 0)})
+    model["repos"], model["more_repos"] = full[:DIGEST_REPOS], max(len(full) - DIGEST_REPOS, 0)
+    model["quiet"], model["more_quiet"] = quiet[:DIGEST_REPOS], max(len(quiet) - DIGEST_REPOS, 0)
 
-    lines.append(f"While you were away (since {since_s})")
     away = [b for b in blocks.values() if b["away"]]
     away.sort(key=lambda b: max(a[0] for a in b["away"]), reverse=True)
     for b in away:
-        lines.append(b["repo"]["display"])
-        events = sorted(b["away"], reverse=True)
-        for _, text, url in events[:DIGEST_AWAY]:
-            lines += entry(text, url)
-        if len(events) > DIGEST_AWAY:
-            lines.append(f"  +{len(events) - DIGEST_AWAY} more")
-    if not away:
+        events = [e for _, e in sorted(b["away"], key=lambda a: a[0], reverse=True)]
+        model["away"].append({**head(b["repo"]), "events": events[:DIGEST_AWAY],
+                              "more": max(len(events) - DIGEST_AWAY, 0)})
+    return model
+
+
+def away_text(e):
+    if e["kind"] == "moved":
+        return f"{e['ref']} → {e['title']}"
+    return f"{e['kind']} {e['ref']} {e['title']}"
+
+
+def row_text(w):
+    return f"{w['ref']} {w['title']}" if w["kind"] == "issue" else f"{w['kind']} {w['ref']} {w['title']}"
+
+
+def render_digest(feed, since, now, active_days=7, stale_hours=None):
+    """The digest email as (subject, plain-text body). Pure: no I/O."""
+    m = digest_model(feed, since, now, active_days, stale_hours)
+    lines = [f"Couldn't refresh from GitHub; this is {stale_hours}h old."] \
+        if stale_hours is not None else []
+    if m["summary"]:
+        return m["subject"], "\n".join(lines + [m["summary"]]) + "\n"
+    if lines:
+        lines.append("")
+    for r in m["repos"]:
+        waiting = f" · {r['waiting_count']} waiting" if r["waiting_count"] else ""
+        lines.append(f"{r['display']} ({r['repo']}){waiting}")
+        if r["left_off"]:
+            lines.append(f"  Left off: {r['left_off']['title']} ({r['left_off']['where']})")
+        if r["next"]:
+            lines += [f"  Next: {row_text(r['next'])}", f"    {r['next']['url']}"]
+        for w in r["waiting"]:
+            lines += [f"  - {row_text(w)}", f"    {w['url']}"]
+        if r["more"]:
+            lines.append(f"  +{r['more']} more")
+        lines.append("")
+    if m["more_repos"]:
+        lines += [f"+{m['more_repos']} more repos", ""]
+    if m["quiet"]:
+        more = f" +{m['more_quiet']} more" if m["more_quiet"] else ""
+        lines += [f"Also active: {', '.join(q['display'] for q in m['quiet'])}{more}", ""]
+
+    lines.append(f"While you were away (since {m['since']})")
+    for a in m["away"]:
+        lines += [f"  {a['display']} · {away_text(e)}" for e in a["events"]]
+        if a["more"]:
+            lines.append(f"  {a['display']} · +{a['more']} more")
+    if not m["away"]:
         lines.append("  Nothing changed.")
-    return subject, "\n".join(lines) + "\n"
+    return m["subject"], "\n".join(lines) + "\n"
 
 
 def digest_settings(cfg):

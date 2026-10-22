@@ -74,10 +74,12 @@ class Demo(unittest.TestCase):
     def test_verify_step_one(self):
         self.assertTrue(self.subject.startswith("devfeed: 4 need you · "))
         self.assertIn("Left off: Wishlist sharing links (feat/wishlist-share)", self.body)
-        self.assertIn("Next: review #145", self.body)
-        self.assertIn("Next: merge #314", self.body)
-        self.assertIn("Next: fix #60", self.body)
-        self.assertIn("#309 Decide on a search provider", self.body)
+        self.assertIn("Storefront (acme/storefront) · 1 waiting", self.body)
+        self.assertIn("- review #145 Product reviews with photos", self.body)
+        self.assertIn("- merge #314 Postgres 17 upgrade", self.body)
+        self.assertIn("- fix #60 Dark mode for settings", self.body)
+        self.assertIn("- #309 Decide on a search provider", self.body)
+        self.assertNotIn("Next: review", self.body)
         self.assertNotIn("Docs", self.body)
         self.assertIn("While you were away (since ", self.body)
 
@@ -98,13 +100,14 @@ class Render(unittest.TestCase):
         for kw, verb in cases:
             with self.subTest(kw=kw):
                 _, body = render(feed([repo(prs=[pr(7, **kw)])]))
-                self.assertIn(f"Next: {verb} #7", body)
+                self.assertIn(f"- {verb} #7", body)
 
     def test_left_off_prefers_branch_then_item(self):
         br = {"title": "wip thing", "branch": "feat/x", "ts": ts(1),
               "url": f"https://github.com/{R}/tree/feat/x"}
         _, body = render(feed([repo(prs=[pr(1)], branches=[br])]))
-        self.assertIn("Left off: wip thing (feat/x)\n    https://github.com/me/app/tree/feat/x", body)
+        self.assertIn("Left off: wip thing (feat/x)\n", body)
+        self.assertNotIn("tree/feat/x", body)
         _, body = render(feed([repo(prs=[pr(1)], items=[item("merge", "#9", 3, "shipped it")])]))
         self.assertIn("Left off: shipped it (#9)", body)
 
@@ -127,7 +130,7 @@ class Render(unittest.TestCase):
         self.assertNotIn("Old", body)
         self.assertNotIn("Never", body)
         _, body = render(feed([repo(prs=[pr(1)]), quiet]), active_days=10)
-        self.assertIn("Old (me/old)", body)
+        self.assertIn("Also active: Old", body)
 
     def test_ordering(self):
         a = repo("me/a", "Alpha", hours=1)
@@ -141,8 +144,8 @@ class Render(unittest.TestCase):
         quiet = repo("me/old", "Old", hours=24 * 20)
         f = feed([repo(prs=[pr(1)]), quiet], cards=[card(5, needs_human=True, repo_name="me/old")])
         _, body = render(f)
-        self.assertIn("Old (me/old)", body)
-        self.assertIn("#5 card 5\n    https://github.com/me/old/issues/5", body)
+        self.assertIn("Old (me/old) · 1 waiting", body)
+        self.assertIn("- #5 card 5\n    https://github.com/me/old/issues/5", body)
 
     def test_done_or_closed_attention_cards_dont_count(self):
         c1, c2 = card(5, "Done", needs_human=True), card(6, needs_human=True)
@@ -201,7 +204,7 @@ class Render(unittest.TestCase):
         f.pop("board")
         subject, body = render(f)
         self.assertIn("1 need you", subject)
-        self.assertIn("Next: review #1", body)
+        self.assertIn("- review #1 pr 1", body)
 
     def test_unicode(self):
         f = feed([repo(display="Café ☕", prs=[pr(1, title="Ünïcödé — émoji 🚀")])])
@@ -225,6 +228,38 @@ class Render(unittest.TestCase):
         many = [repo(f"me/r{n}", f"R{n}", prs=[pr(1)]) for n in range(18)]
         _, body = render(feed(many))
         self.assertIn("+3 more repos", body)
+        quiet = [repo(f"me/q{n}", f"Q{n}", hours=n + 1) for n in range(18)]
+        _, body = render(feed([repo(prs=[pr(1)])] + quiet))
+        self.assertIn("Also active: Q0, Q1,", body)
+        self.assertIn("Q14 +3 more", body)
+
+    def test_next_not_repeated(self):
+        # Next used to repeat the first waiting PR; now it only names a build-next card.
+        _, body = render(feed([repo(prs=[pr(1), pr(2)])]))
+        self.assertNotIn("Next:", body)
+        self.assertEqual(body.count("review #1"), 1)
+        self.assertIn("App (me/app) · 2 waiting", body)
+
+    def test_build_next_gets_a_block_without_waiting(self):
+        nu = [{"repo": R, "build_next": {"ref": "#40", "title": "Build me",
+                                         "url": f"https://github.com/{R}/issues/40"}}]
+        _, body = render(feed([repo(), repo("me/b", "Beta", prs=[pr(1)])], next_up=nu))
+        self.assertIn("App (me/app)\n", body)
+        self.assertIn("Next: build #40 Build me", body)
+        self.assertNotIn("Also active", body)
+
+    def test_quiet_repos_collapsed(self):
+        quiet = [repo("me/q", "Quiet", hours=2), repo("me/z", "Zed", hours=30)]
+        _, body = render(feed([repo(prs=[pr(1)])] + quiet))
+        self.assertIn("\nAlso active: Quiet, Zed\n", body)
+        self.assertNotIn("Quiet (me/q)", body)
+
+    def test_away_compact(self):
+        items = [item("merge", "#1", 2, "shipped")]
+        _, body = render(feed([repo(items=items, prs=[pr(3, hours=5)])], cards=[card(8, "Review", hours=1)]))
+        away = body[body.index("While you were away"):]
+        self.assertIn("  App · #8 → Review\n  App · merged #1 shipped\n  App · new PR #3 pr 3\n", away)
+        self.assertNotIn("https://", away)
 
     def test_stale_first_line(self):
         subject, body = render(feed([repo(prs=[pr(1)])]), stale_hours=9)
