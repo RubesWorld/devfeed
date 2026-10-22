@@ -6,14 +6,25 @@ The first real digest arrived as one long column of plain text, with every link 
 
 ## Done criteria
 - [ ] `render_digest` builds one structured model, which both a text renderer and an HTML renderer read. `render_digest(...)` still returns `(subject, text_body)`, and a new `render_digest_html(...)` returns the HTML.
-- [ ] HTML layout:
-  - a header reading "devfeed · N need you · <date>"
-  - one block per repo with waiting items: the uppercase name and "N waiting" on the right, a "Left off" row, then one row per waiting item with a colored tag (`review`/`fix`/`merge`/`issue`/`build`) and its title as a link
+- [ ] HTML layout matches the page's dark Feed view, using the same tokens as `public/index.html`:
+  - colors: page `#0d0d0d`, surface `#1a1a19`, border `rgba(255,255,255,.10)`, ink `#fff` / `#c3c2b7`, muted `#898781`
+  - fonts: Space Grotesk then the system stack; IBM Plex Mono then `ui-monospace` for the meta text and tags
+  - each repo's slot color, from the page's `SLOT_DARK`
+- [ ] HTML content:
+  - a header with the ◆ mark, "Dev Feed", the date and a "N need you" pill (red when N > 0, green when all clear)
+  - one surface card per repo with waiting items: a 3px left bar in the slot color, the repo name with "N waiting" on the right, a "Left off" row, then one row per waiting item
+  - each waiting row has a bordered mono tag like the page's pills (`review` blue `#3987e5`, `fix` red `#d03b3b`, `merge` green `#0ca30c`, `needs you` amber `#c98500`, `build` muted), the title as a link, and a `#ref` badge tinted with the slot color
   - "Next" only when it isn't already the first waiting row
-  - repos with nothing waiting collapsed into one linked "Also active: A, B, C" line
+  - repos with nothing waiting collapsed into one "Also active: A, B, C" line, with the names linked
   - a compact "While you were away" section
   - no raw URLs in the visible text
-- [ ] The HTML is email-safe: tables and inline styles, no external CSS, fonts or images. A `color-scheme` meta and a `prefers-color-scheme` block handle dark mode. Content is at most 600px wide and readable on a phone. Every title and name is escaped, and only `https://` links become hrefs.
+  - optional: when `digest.page_url` is set, an "open devfeed ↗" link in the header; it's left out when unset, and `config.example.json` leaves it out
+- [ ] The HTML is email-safe:
+  - tables, inline styles and `bgcolor`, so the dark background survives in Gmail
+  - no external CSS, fonts or images
+  - `color-scheme: dark` meta, since the email is always dark like the Feed view
+  - content at most 600px wide and readable on a phone
+  - every title and name escaped, and only `https://` links become hrefs
 - [ ] The text part drops the duplicate Next and collapses quiet repos into "Also active: …". It keeps a URL under each waiting item, so it still works on its own.
 - [ ] The sent message is `multipart/alternative` (text/plain, then text/html, both UTF-8), with the same headers as before. `digest --demo --html` and `digest --dry-run --html` print the HTML. `--html` on a real send exits 1 with a one-line message.
 
@@ -30,11 +41,12 @@ The first real digest arrived as one long column of plain text, with every link 
 - MIME structure: alternative with plain then html, both UTF-8, the text part decodes to render_digest's body → tests/test_digest.py::Send.test_message_headers (extended)
 - `--html` without `--demo`/`--dry-run` → exit 1 → tests/test_digest_html.py::Command.test_html_needs_preview
 - Demo HTML renders without config or GitHub → tests/test_digest_html.py::Command.test_demo_html
+- `digest.page_url` unset → no header link; set → escaped https link → tests/test_digest_html.py::Html.test_page_url
 - Looks right in real clients → manual: one real send to neburai5@gmail.com, viewed in the Gmail app (light + dark) and on desktop
 
 ## Slices
 - [ ] 1. Split `render_digest` into a model builder (`digest_model`) plus a text renderer. Tighten the text: no duplicate Next, "Also active: …" for quiet repos, compact away section. Update the existing render tests to the new text. | files: devfeed.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests && python3 devfeed.py digest --demo` | [local]
 - [ ] 2. `render_digest_html(model)`: escaped, https-only links, table layout, dark mode, phone width. Add the `--html` flag and its checks, and make `build_message` multipart/alternative. Add tests/test_digest_html.py and extend Send.test_message_headers. | files: devfeed.py, tests/test_digest_html.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests && python3 devfeed.py digest --demo --html > /dev/null` | [local]
-- [ ] 3. Docs and CI: the README Digest section (HTML email, `--html` preview tip) and a CI smoke step that checks `digest --demo --html` outputs `<!doctype html>` with no `http://` hrefs | files: README.md, .github/workflows/check.yml | done: `python3 -m unittest discover tests && ruby -ryaml -e 'YAML.load_file(".github/workflows/check.yml")'` | [local]
+- [ ] 3. Docs and CI: the README Digest section (HTML email, `--html` preview tip, optional `digest.page_url`) and a CI smoke step that checks `digest --demo --html` outputs `<!doctype html>` with no `http://` hrefs | files: README.md, .github/workflows/check.yml | done: `python3 -m unittest discover tests && ruby -ryaml -e 'YAML.load_file(".github/workflows/check.yml")'` | [local]
 
 ## Log
