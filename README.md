@@ -149,9 +149,9 @@ and `size_prefix` (`"size:"`).
 `python3 devfeed.py digest` collects once and emails a short re-entry note: for each
 repo with activity in the last `active_days` (or something waiting on you), where you
 left off and everything waiting on you (PRs to fix, merge or review, and cards that need
-you), or Next up's card when nothing is waiting, each with a tappable link. Repos with nothing waiting share one
-"Also active" line. Then "while you were away": merges, new PRs and board moves since
-the last digest. If nothing needs you, the email is one line.
+you), or Next up's card when nothing is waiting, each with a tappable link. Repos with
+nothing waiting share one "Also active" line. Then "while you were away": merges, new
+PRs and board moves since the last digest. If nothing needs you, the email is one line.
 
 The email is HTML styled like the page's dark Feed view (tables and inline styles, no
 images or remote fonts), with a plain-text version for mail apps that prefer it.
