@@ -34,7 +34,8 @@ jobs:
           curl -sf -D - -o /dev/null http://127.0.0.1:8399/index.html | grep -i "cache-control: no-cache"
           curl -sf http://127.0.0.1:8399/feed.json | python -c "import json, sys; f = json.load(sys.stdin); assert f['repos'] and f['board']['cards'] and f['next_up']"
       - name: Digest renders from the demo feed
-        run: python devfeed.py digest --demo | grep "^Subject: devfeed: 4 need you"
+        run: |
+          python devfeed.py digest --demo | grep "^Subject: devfeed: 4 need you"
       - name: Missing config fails cleanly
         run: |
           if python devfeed.py collect --config nope.json; then exit 1; fi
