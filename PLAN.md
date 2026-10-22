@@ -44,10 +44,12 @@ Branch: agent/feat-3-morning-digest · Base: main · Spec: https://github.com/Ru
 - State file never served → manual: `curl http://127.0.0.1:8300/digest-state.json` → 404 (state lives next to config, not in public/)
 
 ## Slices
-- [ ] 1. `render_digest(feed, since, now, stale_hours=None)` pure renderer + `digest --demo` + argparse/docstring + tests (render from demo, one-line, window filter, verbs, no board, unicode, truncation, caps, stale line, drafts, attention card) | files: devfeed.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests && python3 devfeed.py digest --demo` | [local]
+- [x] 1. `render_digest(feed, since, now, stale_hours=None)` pure renderer + `digest --demo` + argparse/docstring + tests (render from demo, one-line, window filter, verbs, no board, unicode, truncation, caps, stale line, drafts, attention card) | files: devfeed.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests && python3 devfeed.py digest --demo` | [local]
 - [ ] 2. `digest` and `digest --dry-run`: config validation, state read (fallbacks) / atomic write, `EmailMessage` build, SMTP send (465→SMTP_SSL, else STARTTLS, 30s, password env-first, scrubbed from errors), stale-feed fallback, exit codes; tests with smtplib mocked | files: devfeed.py, tests/test_digest.py | done: `python3 -m py_compile devfeed.py && python3 -m unittest discover tests` | [local] ⚠️ email
 - [ ] 3. Docs and wiring: `config.example.json` digest block, `.gitignore`, `examples/crontab.txt` line, new `examples/com.example.devfeed-digest.plist`, README Digest section, CI smoke step `python devfeed.py digest --demo` | files: config.example.json, .gitignore, examples/crontab.txt, examples/com.example.devfeed-digest.plist, README.md, .github/workflows/check.yml | done: `python3 -m unittest discover tests && plutil -lint examples/com.example.devfeed-digest.plist && python3 -c "import json; assert json.load(open('config.example.json'))['digest']['active_days'] == 7"` | [local]
 
 ## Log
 - Spec checked against 9477289: 0 commits since the spec, none conflict.
 - Spec mismatch to resolve in slice 1: Verify step 1 says Docs is not listed in `--demo`, but demo Docs' last activity is 120h (5 days), inside the default 7-day window. Plan: move the demo Docs push to ~10 days old (240h) so it's quiet in the digest; the page still shows it (page `active_days` is 14).
+- local-candidate: slice 1 | first-try pass: no | ~375 lines
+- Slice 1 choices: the 80-char cut applies to titles only, not the "verb #N" prefix. When several PRs are waiting, Next is the first non-draft PR in feed order. A stale-feed first line goes above the one-line body too, so that email has two lines.
