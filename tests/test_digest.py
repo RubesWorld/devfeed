@@ -1,9 +1,16 @@
 """Morning digest: rendering, window, state and sending. Run: python3 -m unittest discover tests"""
+import io
+import json
 import os
+import smtplib
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import devfeed  # noqa: E402
@@ -225,6 +232,240 @@ class Render(unittest.TestCase):
         _, body = render(feed([]), stale_hours=9)
         self.assertTrue(body.startswith("Couldn't refresh from GitHub; this is 9h old.\n"))
         self.assertIn("Nothing needs you", body)
+
+
+PW = "s3cret-app-pw"
+SETTINGS = {"to": ["me@example.com"], "from": "bot@example.com", "host": "smtp.example.com",
+            "port": 587, "user": "bot@example.com", "password": PW, "active_days": 7}
+
+
+def cfg_with(digest):
+    return {**devfeed.DEFAULTS, "owners": ["me"], "digest": digest}
+
+
+GOOD = {"to": "me@example.com", "smtp": {"host": "smtp.example.com", "user": "bot@example.com"}}
+
+
+class Settings(unittest.TestCase):
+    def settings(self, digest, env=None):
+        with mock.patch.dict(os.environ, env or {}):
+            if not env:
+                os.environ.pop("DEVFEED_SMTP_PASSWORD", None)
+            return devfeed.digest_settings(cfg_with(digest))
+
+    def assertMissing(self, digest, key, env=None):
+        with self.assertRaises(SystemExit) as e:
+            self.settings(digest, env)
+        self.assertIn(key, str(e.exception.code))
+        self.assertNotIn("\n", str(e.exception.code))
+
+    def test_missing_keys(self):
+        env = {"DEVFEED_SMTP_PASSWORD": PW}
+        self.assertMissing(None, "digest", env)
+        self.assertMissing({"smtp": GOOD["smtp"]}, "digest.to", env)
+        self.assertMissing({"to": "a@b.c", "smtp": {"user": "u"}}, "digest.smtp.host", env)
+        self.assertMissing({"to": "a@b.c", "smtp": {"host": "h"}}, "digest.smtp.user", env)
+        self.assertMissing(GOOD, "DEVFEED_SMTP_PASSWORD")
+
+    def test_defaults_and_password_order(self):
+        s = self.settings({**GOOD, "smtp": {**GOOD["smtp"], "password": "from-config"}},
+                          {"DEVFEED_SMTP_PASSWORD": PW})
+        self.assertEqual((s["port"], s["from"], s["to"], s["password"], s["active_days"]),
+                         (587, "bot@example.com", ["me@example.com"], PW, 7))
+        s = self.settings({**GOOD, "to": ["a@x.y", "b@x.y"],
+                           "smtp": {**GOOD["smtp"], "password": "from-config"}})
+        self.assertEqual((s["to"], s["password"]), (["a@x.y", "b@x.y"], "from-config"))
+
+
+class State(unittest.TestCase):
+    END = datetime(2026, 10, 20, 7, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "digest-state.json")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def start(self, content=None):
+        if content is not None:
+            with open(self.path, "w") as f:
+                f.write(content)
+        with mock.patch.object(devfeed, "log") as log:
+            since = devfeed.read_window_start(self.path, self.END)
+        return since, log.call_count
+
+    def test_state_path_next_to_config(self):
+        self.assertEqual(devfeed.digest_state_path("/x/y/config.json"), "/x/y/digest-state.json")
+
+    def test_missing_state_falls_back_24h(self):
+        self.assertEqual(self.start(), (self.END - timedelta(hours=24), 0))
+
+    def test_valid_state(self):
+        since, _ = self.start(json.dumps({"last_window_end": "2026-10-19T06:00:00Z"}))
+        self.assertEqual(since, datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc))
+
+    def test_malformed_state_falls_back(self):
+        for content in ["{nope", "[]", "{}", '{"last_window_end": "yesterday"}',
+                        '{"last_window_end": 5}']:
+            with self.subTest(content=content):
+                self.assertEqual(self.start(content), (self.END - timedelta(hours=24), 1))
+
+    def test_unreadable_state_falls_back(self):
+        os.mkdir(self.path)   # a directory where the file should be
+        self.assertEqual(self.start(), (self.END - timedelta(hours=24), 1))
+
+    def test_future_state_falls_back(self):
+        since, logged = self.start(json.dumps({"last_window_end": "2026-10-21T06:00:00Z"}))
+        self.assertEqual((since, logged), (self.END - timedelta(hours=24), 1))
+
+    def test_write_is_atomic(self):
+        devfeed.write_state(self.path, "2026-10-20T07:00:00Z", NOW)
+        with open(self.path) as f:
+            self.assertEqual(json.load(f), {"last_window_end": "2026-10-20T07:00:00Z",
+                                            "last_sent_at": "2026-10-20T07:30:00Z"})
+        self.assertEqual(os.listdir(self.dir.name), ["digest-state.json"])
+
+
+class Send(unittest.TestCase):
+    def test_message_headers(self):
+        msg = devfeed.build_message("devfeed: 1 need you · Café", "héllo 🚀\n", SETTINGS, NOW)
+        for h in ("From", "To", "Subject", "Date", "Message-ID"):
+            self.assertTrue(msg[h], h)
+        self.assertEqual(msg.get_content_type(), "text/plain")
+        self.assertEqual(msg.get_content_charset(), "utf-8")
+        self.assertEqual(msg["Subject"], "devfeed: 1 need you · Café")
+        self.assertIn("@example.com>", msg["Message-ID"])
+        msg.as_bytes()
+
+    def mock_smtp(self, name):
+        p = mock.patch.object(devfeed.smtplib, name)
+        cls = p.start()
+        self.addCleanup(p.stop)
+        cls.return_value.__enter__.return_value = cls.return_value
+        return cls
+
+    def test_starttls_on_587(self):
+        smtp = self.mock_smtp("SMTP")
+        msg = devfeed.build_message("s", "b\n", SETTINGS, NOW)
+        devfeed.send_digest(msg, SETTINGS)
+        smtp.assert_called_once_with("smtp.example.com", 587, timeout=30)
+        s = smtp.return_value
+        s.starttls.assert_called_once()
+        s.login.assert_called_once_with("bot@example.com", PW)
+        s.send_message.assert_called_once_with(msg)
+
+    def test_ssl_on_465(self):
+        ssl = self.mock_smtp("SMTP_SSL")
+        plain = self.mock_smtp("SMTP")
+        devfeed.send_digest(devfeed.build_message("s", "b\n", SETTINGS, NOW), {**SETTINGS, "port": 465})
+        ssl.assert_called_once_with("smtp.example.com", 465, timeout=30)
+        ssl.return_value.login.assert_called_once_with("bot@example.com", PW)
+        plain.assert_not_called()
+
+
+class Command(unittest.TestCase):
+    """digest() end to end, with collect and SMTP mocked out."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.config = os.path.join(self.dir.name, "config.json")
+        self.state = os.path.join(self.dir.name, "digest-state.json")
+        self.feed_path = os.path.join(self.dir.name, "feed.json")
+        p = mock.patch.object(devfeed, "OUT_PATH", self.feed_path)
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"DEVFEED_SMTP_PASSWORD": PW})
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(devfeed.smtplib, "SMTP")
+        self.smtp = p.start()
+        self.addCleanup(p.stop)
+        self.smtp.return_value.__enter__.return_value = self.smtp.return_value
+        p = mock.patch.object(devfeed, "log")
+        self.log = p.start()
+        self.addCleanup(p.stop)
+
+    def write_feed(self, hours_old=0):
+        gen = (datetime.now(timezone.utc) - timedelta(hours=hours_old)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(self.feed_path, "w") as f:
+            json.dump({"generated_at": gen, "repos": [repo(prs=[pr(1)])], "board": None}, f)
+        return gen
+
+    def run_digest(self, collected=True, dry_run=False):
+        out = io.StringIO()
+        with mock.patch.object(devfeed, "collect_safely", return_value=collected), redirect_stdout(out):
+            code = devfeed.digest(cfg_with(GOOD), self.config, dry_run)
+        return code, out.getvalue()
+
+    def sent(self):
+        return self.smtp.return_value.send_message.call_args[0][0]
+
+    def test_send_writes_state(self):
+        gen = self.write_feed()
+        code, _ = self.run_digest()
+        self.assertEqual(code, 0)
+        self.assertIn("1 need you", self.sent()["Subject"])
+        with open(self.state) as f:
+            state = json.load(f)
+        self.assertEqual(state["last_window_end"], gen)
+        self.assertTrue(state["last_sent_at"].endswith("Z"))
+
+    def test_dry_run_prints_and_leaves_state(self):
+        self.write_feed()
+        code, out = self.run_digest(dry_run=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("Subject: devfeed: 1 need you"))
+        self.smtp.assert_not_called()
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_stale_feed_first_line(self):
+        self.write_feed(hours_old=9)
+        code, _ = self.run_digest(collected=False)
+        self.assertEqual(code, 0)
+        self.assertTrue(self.sent().get_content().startswith(
+            "Couldn't refresh from GitHub; this is 9h old.\n"))
+
+    def test_no_feed_exits_1(self):
+        code, _ = self.run_digest(collected=False)
+        self.assertEqual(code, 1)
+        self.smtp.assert_not_called()
+
+    def test_send_failure_leaves_state_and_hides_password(self):
+        self.write_feed()
+        devfeed.write_state(self.state, "2026-01-01T00:00:00Z", NOW)
+        with open(self.state) as f:
+            before = f.read()
+        for err in [smtplib.SMTPAuthenticationError(535, f"bad credentials {PW}".encode()),
+                    smtplib.SMTPRecipientsRefused({"nope": (550, b"no such user")}),
+                    OSError(f"timed out talking to {PW}")]:
+            with self.subTest(err=type(err).__name__):
+                self.log.reset_mock()
+                self.smtp.return_value.login.side_effect = err
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code, _ = self.run_digest()
+                self.assertEqual(code, 1)
+                logged = " ".join(str(c) for c in self.log.call_args_list) + out.getvalue()
+                self.assertNotIn(PW, logged)
+                self.assertTrue(self.log.called)
+                with open(self.state) as f:
+                    self.assertEqual(f.read(), before)
+
+    def test_missing_settings_exit_before_collect(self):
+        with mock.patch.object(devfeed, "collect_safely") as collect, self.assertRaises(SystemExit):
+            devfeed.digest(cfg_with({"to": "a@b.c"}), self.config, False)
+        collect.assert_not_called()
+
+    def test_demo_prints_without_config(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run([sys.executable, os.path.join(root, "devfeed.py"), "digest", "--demo",
+                            "--config", os.path.join(self.dir.name, "nope.json")],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("Subject: devfeed: 4 need you"))
+        self.assertEqual(os.listdir(self.dir.name), [])
 
 
 if __name__ == "__main__":

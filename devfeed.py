@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import smtplib
 import socketserver
 import subprocess
 import sys
@@ -37,6 +38,8 @@ import threading
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime, make_msgid
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -798,6 +801,119 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
     return subject, "\n".join(lines) + "\n"
 
 
+def digest_settings(cfg):
+    """Who to mail and how, from config.json's `digest` block. Exits with one
+    line naming the first missing key."""
+    d = cfg.get("digest")
+    if not isinstance(d, dict):
+        sys.exit("digest: add a \"digest\" block to config.json (see config.example.json)")
+    smtp = d.get("smtp") or {}
+    to = d.get("to")
+    to = [to] if isinstance(to, str) else list(to or [])
+    to = [a.strip() for a in to if a and a.strip()]
+    if not to:
+        sys.exit("digest: config.json is missing digest.to")
+    for key in ("host", "user"):
+        if not smtp.get(key):
+            sys.exit(f"digest: config.json is missing digest.smtp.{key}")
+    password = os.environ.get("DEVFEED_SMTP_PASSWORD") or smtp.get("password")
+    if not password:
+        sys.exit("digest: no SMTP password: set DEVFEED_SMTP_PASSWORD or digest.smtp.password")
+    return {"to": to, "from": smtp.get("from") or smtp["user"], "host": smtp["host"],
+            "port": int(smtp.get("port") or 587), "user": smtp["user"], "password": password,
+            "active_days": d.get("active_days", 7)}
+
+
+def digest_state_path(config_path):
+    # Next to the config, never in public/, so it is never served.
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), "digest-state.json")
+
+
+def read_window_start(path, end):
+    """Where "while you were away" starts: the last sent digest's window end,
+    or 24h before `end` when there is no usable state."""
+    fallback = end - timedelta(hours=24)
+    if not os.path.exists(path):
+        return fallback
+    try:
+        with open(path) as f:
+            since = parse_ts(json.load(f)["last_window_end"])
+        if since.tzinfo is None:
+            raise ValueError("timestamp without a zone")
+    except Exception as e:
+        log(f"digest: ignoring {path} ({type(e).__name__}); window is the last 24h")
+        return fallback
+    if since > end:
+        log(f"digest: {path} is in the future; window is the last 24h")
+        return fallback
+    return since
+
+
+def write_state(path, window_end, sent_at):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"last_window_end": window_end,
+                   "last_sent_at": sent_at.strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+    os.replace(tmp, path)
+
+
+def build_message(subject, body, settings, now):
+    msg = EmailMessage()
+    msg["From"] = settings["from"]
+    msg["To"] = ", ".join(settings["to"])
+    msg["Subject"] = subject
+    msg["Date"] = format_datetime(now)
+    # An explicit domain: make_msgid's default looks up the host name, which can hang.
+    msg["Message-ID"] = make_msgid(domain=settings["from"].rpartition("@")[2] or "devfeed")
+    msg.set_content(body, charset="utf-8")
+    return msg
+
+
+def send_digest(msg, settings):
+    host, port = settings["host"], settings["port"]
+    if port == 465:
+        conn = smtplib.SMTP_SSL(host, port, timeout=30)
+    else:
+        conn = smtplib.SMTP(host, port, timeout=30)
+    with conn as s:
+        if port != 465:
+            s.starttls()
+        s.login(settings["user"], settings["password"])
+        s.send_message(msg)
+
+
+def digest(cfg, config_path, dry_run):
+    """Collect once, render the digest and send it (or print it). Returns the
+    exit code. State is only written after the mail server accepted it."""
+    settings = None if dry_run else digest_settings(cfg)
+    collected = collect_safely(cfg)
+    try:
+        with open(OUT_PATH) as f:
+            feed = json.load(f)
+        end = parse_ts(feed["generated_at"])
+    except Exception as e:
+        log(f"digest: no feed to send ({type(e).__name__}: {OUT_PATH})")
+        return 1
+    now = datetime.now(timezone.utc)
+    stale = None if collected else max(round((now - end).total_seconds() / 3600), 0)
+    state = digest_state_path(config_path)
+    since = read_window_start(state, end)
+    active_days = (cfg.get("digest") or {}).get("active_days", 7)
+    subject, body = render_digest(feed, since, now, active_days, stale)
+    if dry_run:
+        print(f"Subject: {subject}\n\n{body}", end="")
+        return 0
+    try:
+        send_digest(build_message(subject, body, settings, now), settings)
+    except Exception as e:
+        # Never let the password reach the log, whatever the server echoed back.
+        log(f"digest: send failed: {type(e).__name__}: {str(e).replace(settings['password'], '***')}")
+        return 1
+    write_state(state, feed["generated_at"], now)
+    log(f"digest sent to {', '.join(settings['to'])}: {subject}")
+    return 0
+
+
 class Server(http.server.ThreadingHTTPServer):
     """HTTPServer.server_bind does a reverse-DNS lookup of the bind address,
     which can hang for a long time when DNS is slow. Nothing here needs it."""
@@ -865,6 +981,8 @@ def main():
         cfg["port"] = args.port
     if args.command == "collect":
         sys.exit(0 if collect_safely(cfg) else 1)
+    if args.command == "digest":
+        sys.exit(digest(cfg, args.config, args.dry_run))
     serve(cfg)
 
 
