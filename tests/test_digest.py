@@ -225,6 +225,12 @@ class Render(unittest.TestCase):
         _, body = render(feed([repo(items=items, prs=prs)]))
         self.assertIn("+3 more", body)          # 8 waiting, 5 shown
         self.assertIn("+11 more", body)         # 13 merges + 8 new PRs, 10 shown
+        busy = [repo(f"me/b{n}", f"B{n}", items=[item("merge", f"#{k}", 1) for k in range(12)])
+                for n in range(4)]
+        _, body = render(feed([repo(prs=[pr(1)])] + busy))
+        away = body[body.index("While you were away"):]
+        self.assertEqual(away.count(" · merged #"), 25)  # 10 + 10 + 5, then the total cap
+        self.assertIn("+13 more in other repos", away)  # 2 x 12 merges + new PR #1
         many = [repo(f"me/r{n}", f"R{n}", prs=[pr(1)]) for n in range(18)]
         _, body = render(feed(many))
         self.assertIn("+3 more repos", body)
@@ -459,7 +465,7 @@ class Command(unittest.TestCase):
         self.write_feed(hours_old=9)
         code, _ = self.run_digest(collected=False)
         self.assertEqual(code, 0)
-        self.assertTrue(self.sent().get_content().startswith(
+        self.assertTrue(self.sent().get_body(("plain",)).get_content().startswith(
             "Couldn't refresh from GitHub; this is 9h old.\n"))
 
     def test_no_feed_exits_1(self):

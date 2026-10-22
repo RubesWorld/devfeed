@@ -43,6 +43,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
+from html import escape
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -676,6 +677,7 @@ DIGEST_TITLE = 80         # characters before a title is cut with …
 DIGEST_WAITING = 5        # waiting items shown per repo
 DIGEST_AWAY = 10          # "while you were away" items shown per repo
 DIGEST_REPOS = 15
+DIGEST_AWAY_TOTAL = 25    # "while you were away" lines across all repos
 
 
 def parse_ts(s):
@@ -798,10 +800,16 @@ def digest_model(feed, since, now, active_days=7, stale_hours=None):
 
     away = [b for b in blocks.values() if b["away"]]
     away.sort(key=lambda b: max(a[0] for a in b["away"]), reverse=True)
+    room, model["more_away"] = DIGEST_AWAY_TOTAL, 0
     for b in away:
         events = [e for _, e in sorted(b["away"], key=lambda a: a[0], reverse=True)]
-        model["away"].append({**head(b["repo"]), "events": events[:DIGEST_AWAY],
-                              "more": max(len(events) - DIGEST_AWAY, 0)})
+        shown = events[:min(DIGEST_AWAY, room)]
+        if not shown:
+            model["more_away"] += len(events)
+            continue
+        room -= len(shown)
+        model["away"].append({**head(b["repo"]), "events": shown,
+                              "more": len(events) - len(shown)})
     return model
 
 
@@ -847,9 +855,147 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
         lines += [f"  {a['display']} · {away_text(e)}" for e in a["events"]]
         if a["more"]:
             lines.append(f"  {a['display']} · +{a['more']} more")
+    if m["more_away"]:
+        lines.append(f"  +{m['more_away']} more in other repos")
     if not m["away"]:
         lines.append("  Nothing changed.")
     return m["subject"], "\n".join(lines) + "\n"
+
+
+# The page's dark Feed view (public/index.html), as inline styles: email
+# clients drop <style> blocks and external fonts often enough not to rely on
+# them. The sans stack is set once on the wrapper and inherited.
+INK, INK2, MUTED, PAGE, SURFACE, GRID = "#ffffff", "#c3c2b7", "#898781", "#0d0d0d", "#1a1a19", "#2c2c2a"
+GOOD, CRITICAL, WARN, NEW = "#0ca30c", "#d03b3b", "#c98500", "#3987e5"
+SLOT_DARK = {1: "#3987e5", 2: "#d95926", 3: "#199e70", 4: "#c98500",
+             5: "#9b6fe0", 6: "#d9468f", 7: "#2fa7b8", 8: "#8a9a3a"}
+SANS = "'Space Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+MONO = "'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace"
+CHIP_MONO = "'IBM Plex Mono',Menlo,monospace"   # short: chips repeat on every row
+TAGS = {"review": ("review", NEW), "fix": ("fix", CRITICAL), "merge": ("merge", GOOD),
+        "issue": ("needs you", WARN), "build": ("build next", MUTED),
+        "merged": ("merged", GOOD), "new PR": ("new PR", NEW), "moved": ("moved", MUTED)}
+TABLE = 'width="100%" cellpadding="0" cellspacing="0" role="presentation"'
+
+
+def slot_color(slot):
+    return SLOT_DARK[((slot or SLOTS) - 1) % SLOTS + 1]
+
+
+def tint(color, alpha=0.18, bg=SURFACE):
+    """`color` laid over `bg` at `alpha`, as a solid hex (no rgba in email)."""
+    c, b = (tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) for h in (color, bg))
+    return "#" + "".join(f"{round(x * alpha + y * (1 - alpha)):02x}" for x, y in zip(c, b))
+
+
+def link(text, url, color, schemes=("https://",)):
+    """Escaped link text; the href only for the allowed schemes, else plain text."""
+    if url.startswith(schemes):
+        return f'<a href="{escape(url)}" style="color:{color};text-decoration:none">{escape(text)}</a>'
+    return f'<span style="color:{color}">{escape(text)}</span>'
+
+
+def chip(text, color, bg=None):
+    """A small mono label: bordered like the page's pills, or filled like its #ref badges."""
+    look = f"background:{bg}" if bg else f"border:1px solid {color}"
+    return (f'<span style="padding:1px 6px;{look};border-radius:4px;font:11px {CHIP_MONO};'
+            f'color:{color}">{escape(text).replace(" ", "&nbsp;")}</span>')
+
+
+def tag(kind):
+    return chip(*TAGS[kind])
+
+
+def render_digest_html(feed, since, now, active_days=7, stale_hours=None, page_url=None):
+    """The digest email's HTML part, styled like the page's Feed view: tables
+    and inline styles only, every string escaped, https links only. Pure."""
+    m = digest_model(feed, since, now, active_days, stale_hours)
+    out = []
+    add = out.append
+    meta = f"font:12px/1.5 {MONO};color:{MUTED}"
+    if page_url and page_url.startswith(("https://", "http://")):
+        opened = " · " + link("open devfeed ↗", page_url, INK2, ("https://", "http://"))
+    else:
+        opened = ""
+    dot = CRITICAL if m["waiting_total"] else GOOD
+    pill = f"{m['waiting_total']} need you" if m["waiting_total"] else "all clear"
+    add(f'<tr><td style="padding:0 0 18px"><table {TABLE}><tr><td width="38">'
+        f'<div style="width:36px;line-height:36px;text-align:center;background:{SURFACE};'
+        f'border:1px solid {GRID};border-radius:9px;font-size:18px">◆</div></td>'
+        f'<td style="padding-left:10px"><div style="font-size:19px;font-weight:600;line-height:1.2">Dev Feed</div>'
+        f'<div style="{meta}">{escape(m["day"])}{opened}</div></td>'
+        f'<td align="right" style="white-space:nowrap"><span style="display:inline-block;padding:5px 11px;'
+        f'background:{SURFACE};border:1px solid {GRID};border-radius:99px;font:12px {MONO};color:{INK2}">'
+        f'<span style="color:{dot}">●</span> {pill}</span></td></tr></table></td></tr>')
+    if stale_hours is not None:
+        add(f'<tr><td style="padding:0 0 12px;font-size:13px;color:{CRITICAL}">'
+            f'{escape(f"Couldn{chr(39)}t refresh from GitHub; this is {stale_hours}h old.")}</td></tr>')
+
+    card = f'{TABLE} bgcolor="{SURFACE}" style="background:{SURFACE};border:1px solid {GRID};border-radius:10px'
+    if m["summary"]:
+        add(f'<tr><td><table {card}"><tr><td style="padding:16px;font-size:14px;color:{INK2}">'
+            f'{escape(m["summary"])}</td></tr></table></td></tr>')
+
+    line = f"border-top:1px solid {GRID}"
+    for r in m["repos"]:
+        slot = slot_color(r["slot"])
+        count = (f'<td align="right" style="padding:13px 16px 4px 0;font:12px {MONO};color:{WARN};'
+                 f'white-space:nowrap">{r["waiting_count"]} waiting</td>') if r["waiting_count"] else "<td></td>"
+        rows = [f'<tr><td colspan="2" style="padding:13px 0 4px 14px;font-size:16px;font-weight:600">'
+                f'{link(r["display"], r["url"], INK)}</td>{count}</tr>']
+        if r["left_off"]:
+            lo = r["left_off"]
+            rows.append(f'<tr><td colspan="3" style="padding:0 16px 10px 14px;{meta}">Left off '
+                        f'{link(lo["title"], lo["url"], INK2)} · {escape(lo["where"])}</td></tr>')
+        for w in ([r["next"]] if r["next"] else []) + r["waiting"]:
+            rows.append(f'<tr><td width="1" nowrap valign="top" style="padding:9px 10px 9px 14px;{line}">'
+                        f'{tag(w["kind"])}</td><td valign="top" style="padding:8px 0;{line};font-size:14px">'
+                        f'{link(w["title"], w["url"], INK)}</td><td width="1" nowrap valign="top" '
+                        f'style="padding:9px 16px 9px 10px;{line}">{chip(w["ref"], slot, tint(slot))}</td></tr>')
+        if r["more"]:
+            rows.append(f'<tr><td colspan="3" style="padding:8px 14px;{line};{meta}">+{r["more"]} more</td></tr>')
+        add(f'<tr><td style="padding:0 0 12px"><table {card};border-left:3px solid {slot}">'
+            f'{"".join(rows)}<tr><td colspan="3" height="4"></td></tr></table></td></tr>')
+    if m["more_repos"]:
+        add(f'<tr><td style="padding:0 0 12px;{meta}">+{m["more_repos"]} more repos</td></tr>')
+
+    def section(title):
+        return (f'<tr><td style="padding:10px 0 8px;font:500 11px {MONO};letter-spacing:0.12em;'
+                f'text-transform:uppercase;color:{MUTED}">{title}</td></tr>')
+
+    if m["quiet"]:
+        names = ", ".join(link(q["display"], q["url"], slot_color(q["slot"])) for q in m["quiet"])
+        more = f' <span style="color:{MUTED}">+{m["more_quiet"]} more</span>' if m["more_quiet"] else ""
+        add(section("Also active"))
+        add(f'<tr><td style="padding:0 0 12px;font-size:14px;color:{INK2}">{names}{more}</td></tr>')
+
+    if not m["summary"]:
+        add(section(f"While you were away · since {escape(m['since'])}"))
+        lines = []
+        for a in m["away"]:
+            name = f'<b>{link(a["display"], a["url"], slot_color(a["slot"]))}</b>'
+            for e in a["events"]:
+                text = f"{e['ref']} → {e['title']}" if e["kind"] == "moved" else f"{e['ref']} {e['title']}"
+                lines.append(f"{name} {tag(e['kind'])} {link(text, e['url'], INK2)}")
+            if a["more"]:
+                lines.append(f'{name} <span style="color:{MUTED}">+{a["more"]} more</span>')
+        if m["more_away"]:
+            lines.append(f'<span style="color:{MUTED}">+{m["more_away"]} more in other repos</span>')
+        if not lines:
+            lines.append(f'<span style="color:{MUTED}">Nothing changed.</span>')
+        add("".join(f'<tr><td style="padding:4px 0;font-size:13px;color:{INK2}">{x}</td></tr>' for x in lines))
+
+    add(f'<tr><td style="padding:22px 0 0;font:11px {MONO};color:{MUTED}">devfeed · window since '
+        f'{escape(m["since"])}</td></tr>')
+    return (f'<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark">'
+            f'<title>{escape(m["subject"])}</title></head>'
+            f'<body bgcolor="{PAGE}" style="margin:0;padding:0;background:{PAGE}">'
+            f'<table {TABLE} bgcolor="{PAGE}" style="background:{PAGE}"><tr>'
+            f'<td align="center" style="padding:24px 12px;font-family:{SANS};line-height:1.45;color:{INK}">'
+            f'<table {TABLE} style="max-width:600px;font-family:{SANS};color:{INK}">'
+            f'{"".join(out)}</table></td></tr></table></body></html>\n')
 
 
 def digest_settings(cfg):
@@ -884,6 +1030,16 @@ def config_int(value, key):
         return int(value)
     except (TypeError, ValueError):
         sys.exit(f"digest: {key} must be a whole number, not {value!r}")
+
+
+def digest_page_url(cfg):
+    """Optional link to your own devfeed page, shown in the email's header."""
+    url = (cfg.get("digest") or {}).get("page_url")
+    if url is None or url == "":
+        return None
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        sys.exit("digest: digest.page_url must start with http:// or https://")
+    return url
 
 
 def digest_active_days(cfg):
@@ -938,7 +1094,7 @@ def write_state(path, window_end, sent_at):
         raise
 
 
-def build_message(subject, body, settings, now):
+def build_message(subject, body, settings, now, html=None):
     msg = EmailMessage()
     msg["From"] = settings["from"]
     msg["To"] = ", ".join(settings["to"])
@@ -947,6 +1103,8 @@ def build_message(subject, body, settings, now):
     # An explicit domain: make_msgid's default looks up the host name, which can hang.
     msg["Message-ID"] = make_msgid(domain=settings["from"].rpartition("@")[2] or "devfeed")
     msg.set_content(body, charset="utf-8")
+    if html:
+        msg.add_alternative(html, subtype="html", charset="utf-8")
     return msg
 
 
@@ -984,11 +1142,12 @@ def scrub(text, password, user):
     return text
 
 
-def digest(cfg, config_path, dry_run):
+def digest(cfg, config_path, dry_run, html=False):
     """Collect once, render the digest and send it (or print it). Returns the
     exit code. State is only written after the mail server accepted it."""
     settings = None if dry_run else digest_settings(cfg)
     active_days = digest_active_days(cfg)
+    page_url = digest_page_url(cfg)
     try:
         collected = collect_safely(cfg)
     except SystemExit as e:
@@ -1010,11 +1169,12 @@ def digest(cfg, config_path, dry_run):
     state = digest_state_path(config_path)
     since = read_window_start(state, end)
     subject, body = render_digest(feed, since, now, active_days, stale)
+    page = render_digest_html(feed, since, now, active_days, stale, page_url)
     if dry_run:
-        print(f"Subject: {subject}\n\n{body}", end="")
+        print(page if html else f"Subject: {subject}\n\n{body}", end="")
         return 0
     try:
-        send_digest(build_message(subject, body, settings, now), settings)
+        send_digest(build_message(subject, body, settings, now, page), settings)
     except Exception as e:
         # Never let the password reach the log, whatever the server echoed back.
         log(f"digest: send failed: {type(e).__name__}: "
@@ -1077,12 +1237,19 @@ def main():
     p.add_argument("--port", type=int, help="override the port from config.json")
     p.add_argument("--dry-run", action="store_true", help="digest: print the email, don't send it")
     p.add_argument("--demo", action="store_true", help="digest: render made-up data, no GitHub")
+    p.add_argument("--html", action="store_true",
+                   help="digest, with --demo or --dry-run: print the HTML part instead of the text")
     args = p.parse_args()
+    if args.html and not (args.command == "digest" and (args.demo or args.dry_run)):
+        sys.exit("--html only previews: use it with digest --demo or digest --dry-run")
     if args.command == "digest" and args.demo:
         f = demo_feed()
         end = parse_ts(f["generated_at"])
-        subject, body = render_digest(f, end - timedelta(hours=24), end)
-        print(f"Subject: {subject}\n\n{body}", end="")
+        if args.html:
+            print(render_digest_html(f, end - timedelta(hours=24), end), end="")
+        else:
+            subject, body = render_digest(f, end - timedelta(hours=24), end)
+            print(f"Subject: {subject}\n\n{body}", end="")
         return
     if args.command == "demo":
         os.makedirs(PUBLIC, exist_ok=True)
@@ -1098,7 +1265,7 @@ def main():
     if args.command == "collect":
         sys.exit(0 if collect_safely(cfg) else 1)
     if args.command == "digest":
-        sys.exit(digest(cfg, args.config, args.dry_run))
+        sys.exit(digest(cfg, args.config, args.dry_run, args.html))
     serve(cfg)
 
 
