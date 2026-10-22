@@ -1,3 +1,10 @@
 # Already serving the folder some other way (nginx, Caddy, GitHub Pages)?
 # Skip `serve` and just regenerate public/feed.json every 5 minutes:
 */5 * * * * cd /path/to/devfeed && /usr/bin/python3 devfeed.py collect 2>> /tmp/devfeed.log
+
+# Morning digest email, every day at 07:30 (see README > Digest). Cron's PATH is
+# minimal, so point it at gh, and set the SMTP password here (this file is yours,
+# not the repo's; keep it private) or in digest.smtp.password in config.json:
+# DEVFEED_SMTP_PASSWORD=your-app-password
+# PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+30 7 * * * cd /path/to/devfeed && /usr/bin/python3 devfeed.py digest 2>> /tmp/devfeed-digest.log

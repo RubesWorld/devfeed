@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """devfeed — one page for what shipped and what's waiting, across all your GitHub repos.
 
-Two commands, standard library only, GitHub access through the gh CLI:
+A few commands, standard library only, GitHub access through the gh CLI:
 
     python3 devfeed.py collect   # fetch once and write public/feed.json
     python3 devfeed.py serve     # serve the page and re-collect every few minutes
     python3 devfeed.py demo      # serve made-up data, no GitHub needed
+    python3 devfeed.py digest    # collect once and email a morning digest
+                                 # (--dry-run prints it, --demo renders made-up data)
 
 Which repos to watch is discovered, not configured: every non-archived,
 non-fork repo of each owner pushed within `active_days`, plus any `pin`ned in
@@ -22,19 +24,25 @@ red when it goes stale, so a broken collector is visible on the page itself.
 """
 
 import argparse
+import base64
 import functools
 import http.server
 import json
 import os
 import re
 import shutil
+import smtplib
 import socketserver
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime, make_msgid
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -519,6 +527,8 @@ def daily_counts(commit_ts, days):
 
 
 def collect(cfg):
+    # Stamped before fetching, so anything that lands mid-run falls in the next digest's window.
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     since = utc_cutoff(cfg["days"])
     ignored = set(cfg["ignore_branches"])
 
@@ -539,7 +549,7 @@ def collect(cfg):
         })
 
     feed = {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "interval_minutes": cfg["interval_minutes"],
         "spark_days": cfg["spark_days"],
         "days": cfg["days"],
@@ -599,7 +609,7 @@ def demo_feed():
             ("push", "Drop the legacy v1 auth route", "9b1d3aa", 98),
         ], [("Postgres 17 upgrade", "#314", 6, "SUCCESS", "APPROVED")], []),
         ("acme/docs", "Docs", 5, [
-            ("push", "Quickstart rewrite", "e0d2b77", 120),
+            ("push", "Quickstart rewrite", "e0d2b77", 240),
         ], [], []),
     ]
     repos = []
@@ -657,6 +667,323 @@ def demo_feed():
             "repos": repos, "board": board, "next_up": next_up(board, {}), "demo": True}
 
 
+DIGEST_TITLE = 80         # characters before a title is cut with …
+DIGEST_WAITING = 5        # waiting items shown per repo
+DIGEST_AWAY = 10          # "while you were away" items shown per repo
+DIGEST_REPOS = 15
+
+
+def parse_ts(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def local_time(dt):
+    return dt.astimezone().strftime("%a %d %b %H:%M")
+
+
+def pr_verb(p):
+    if p.get("review") == "CHANGES_REQUESTED" or p.get("checks") == "FAILURE":
+        return "fix"
+    if p.get("review") == "APPROVED" and p.get("checks") == "SUCCESS":
+        return "merge"
+    return "review"
+
+
+def render_digest(feed, since, now, active_days=7, stale_hours=None):
+    """The digest email as (subject, body), from a feed and the window start.
+    Pure: no I/O, so the caller decides the window, the clock and staleness."""
+    end = parse_ts(feed["generated_at"])
+    active_cutoff = now - timedelta(days=active_days)
+    board = feed.get("board") or {}
+    build_next = {n["repo"]: n["build_next"] for n in feed.get("next_up") or [] if n.get("build_next")}
+
+    def cut(title):
+        return title if len(title) <= DIGEST_TITLE else title[:DIGEST_TITLE - 1] + "…"
+
+    def entry(text, url):
+        return [f"  - {text}", f"    {url}"]
+
+    def in_window(s):
+        return bool(s) and since < parse_ts(s) <= end
+
+    # Cards can name repos the feed doesn't list (no recent pushes), so
+    # everything is keyed by repo name, with the feed's entry when there is one.
+    repos = {r["repo"]: r for r in feed["repos"]}
+    blocks = {}
+
+    def block(name):
+        if name not in blocks:
+            r = repos.get(name) or {"repo": name, "display": name.split("/")[-1],
+                                    "last_activity": None, "items": [], "open_prs": [],
+                                    "branches": []}
+            blocks[name] = {"repo": r, "waiting": [], "away": []}
+        return blocks[name]
+
+    counts = {"merge": 0, "pr": 0, "move": 0}
+    for r in feed["repos"]:
+        b = block(r["repo"])
+        for p in r["open_prs"]:
+            if not p["draft"]:
+                b["waiting"].append((f"{pr_verb(p)} {p['ref']} {cut(p['title'])}", p["url"]))
+        for i in r["items"]:
+            if i["type"] == "merge" and in_window(i["ts"]):
+                b["away"].append((i["ts"], f"merged {i['ref']} {cut(i['title'])}", i["url"]))
+                counts["merge"] += 1
+        for p in r["open_prs"]:
+            if in_window(p.get("opened")):
+                b["away"].append((p["opened"], f"new PR {p['ref']} {cut(p['title'])}", p["url"]))
+                counts["pr"] += 1
+    for c in board.get("cards") or []:
+        if c.get("needs_human") and c["status"] != "Done" and not c["closed"]:
+            block(c["repo"])["waiting"].append((f"{c['ref']} {cut(c['title'])}", c["url"]))
+        if in_window(c.get("since")):
+            block(c["repo"])["away"].append((c["since"], f"{c['ref']} → {c['status']}", c["url"]))
+            counts["move"] += 1
+
+    waiting_total = sum(len(b["waiting"]) for b in blocks.values())
+    day = now.astimezone().strftime("%a %d %b")
+    subject = f"devfeed: {waiting_total} need you · {day}" if waiting_total \
+        else f"devfeed: all clear · {day}"
+    lines = [f"Couldn't refresh from GitHub; this is {stale_hours}h old."] \
+        if stale_hours is not None else []
+    since_s = local_time(since)
+
+    if not waiting_total:
+        if any(counts.values()):
+            parts = [f"{counts['merge']} merge{'s' * (counts['merge'] != 1)}",
+                     f"{counts['pr']} new PR{'s' * (counts['pr'] != 1)}",
+                     f"{counts['move']} board move{'s' * (counts['move'] != 1)}"]
+            lines.append(f"Nothing needs you. Since {since_s}: {', '.join(parts)}.")
+        else:
+            lines.append(f"Nothing needs you, and nothing changed since {since_s}.")
+        return subject, "\n".join(lines) + "\n"
+
+    def recent(b):
+        return b["repo"]["last_activity"] or ""
+
+    active = [b for b in blocks.values() if b["waiting"]
+              or (b["repo"]["last_activity"] and parse_ts(b["repo"]["last_activity"]) >= active_cutoff)]
+    active.sort(key=recent, reverse=True)
+    active.sort(key=lambda b: not b["waiting"])
+    if lines:
+        lines.append("")
+    for b in active[:DIGEST_REPOS]:
+        r = b["repo"]
+        lines.append(f"{r['display']} ({r['repo']})")
+        last = (r["branches"][:1] and r["branches"][0]) or (r["items"][:1] and r["items"][0])
+        if last:
+            where = last.get("branch") or last["ref"]
+            lines += [f"  Left off: {cut(last['title'])} ({where})", f"    {last['url']}"]
+        nxt = next((p for p in r["open_prs"] if not p["draft"]), None)
+        if nxt:
+            lines += [f"  Next: {pr_verb(nxt)} {nxt['ref']} {cut(nxt['title'])}",
+                      f"    {nxt['url']}"]
+        elif r["repo"] in build_next:
+            bn = build_next[r["repo"]]
+            lines += [f"  Next: build {bn['ref']} {cut(bn['title'])}", f"    {bn['url']}"]
+        if b["waiting"]:
+            lines.append("  Waiting on you:")
+            for text, url in b["waiting"][:DIGEST_WAITING]:
+                lines += entry(text, url)
+            if len(b["waiting"]) > DIGEST_WAITING:
+                lines.append(f"  +{len(b['waiting']) - DIGEST_WAITING} more")
+        lines.append("")
+    if len(active) > DIGEST_REPOS:
+        lines += [f"+{len(active) - DIGEST_REPOS} more repos", ""]
+
+    lines.append(f"While you were away (since {since_s})")
+    away = [b for b in blocks.values() if b["away"]]
+    away.sort(key=lambda b: max(a[0] for a in b["away"]), reverse=True)
+    for b in away:
+        lines.append(b["repo"]["display"])
+        events = sorted(b["away"], reverse=True)
+        for _, text, url in events[:DIGEST_AWAY]:
+            lines += entry(text, url)
+        if len(events) > DIGEST_AWAY:
+            lines.append(f"  +{len(events) - DIGEST_AWAY} more")
+    if not away:
+        lines.append("  Nothing changed.")
+    return subject, "\n".join(lines) + "\n"
+
+
+def digest_settings(cfg):
+    """Who to mail and how, from config.json's `digest` block. Exits with one
+    line naming the first missing key."""
+    d = cfg.get("digest")
+    if not isinstance(d, dict):
+        sys.exit("digest: add a \"digest\" block to config.json (see config.example.json)")
+    smtp = d.get("smtp") or {}
+    to = d.get("to")
+    to = [to] if isinstance(to, str) else to or []
+    if not isinstance(to, list) or not all(isinstance(a, str) for a in to):
+        sys.exit("digest: digest.to must be an address or a list of addresses")
+    to = [a.strip() for a in to if a.strip()]
+    if not to:
+        sys.exit("digest: config.json is missing digest.to")
+    for key in ("host", "user"):
+        if not smtp.get(key):
+            sys.exit(f"digest: config.json is missing digest.smtp.{key}")
+    password = os.environ.get("DEVFEED_SMTP_PASSWORD") or smtp.get("password")
+    if not password:
+        sys.exit("digest: no SMTP password: set DEVFEED_SMTP_PASSWORD or digest.smtp.password")
+    return {"to": to, "from": smtp.get("from") or smtp["user"], "host": smtp["host"],
+            "port": config_int(smtp.get("port") or 587, "digest.smtp.port"), "user": smtp["user"],
+            "password": password, "active_days": digest_active_days(cfg)}
+
+
+def config_int(value, key):
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return int(value)
+    except (TypeError, ValueError):
+        sys.exit(f"digest: {key} must be a whole number, not {value!r}")
+
+
+def digest_active_days(cfg):
+    return config_int((cfg.get("digest") or {}).get("active_days", 7), "digest.active_days")
+
+
+def digest_state_path(config_path):
+    # Next to the config, never in public/, so it is never served.
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), "digest-state.json")
+
+
+def read_window_start(path, end):
+    """Where "while you were away" starts: the last sent digest's window end,
+    or 24h before `end` when there is no usable state."""
+    fallback = end - timedelta(hours=24)
+    if not os.path.exists(path):
+        return fallback
+    try:
+        with open(path) as f:
+            since = parse_ts(json.load(f)["last_window_end"])
+        if since.tzinfo is None:
+            raise ValueError("timestamp without a zone")
+    except Exception as e:
+        log(f"digest: ignoring {path} ({type(e).__name__}); window is the last 24h")
+        return fallback
+    if since > end:
+        log(f"digest: {path} is in the future; window is the last 24h")
+        return fallback
+    return since
+
+
+def write_state(path, window_end, sent_at):
+    """Atomic, and never moves the window backwards: when an overlapping run
+    with a newer feed already wrote, its window end stays."""
+    try:
+        with open(path) as f:
+            if parse_ts(json.load(f)["last_window_end"]) >= parse_ts(window_end):
+                return
+    except Exception:
+        pass
+    # A tmp file per run, so overlapping runs never replace each other's.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"last_window_end": window_end,
+                       "last_sent_at": sent_at.strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def build_message(subject, body, settings, now):
+    msg = EmailMessage()
+    msg["From"] = settings["from"]
+    msg["To"] = ", ".join(settings["to"])
+    msg["Subject"] = subject
+    msg["Date"] = format_datetime(now)
+    # An explicit domain: make_msgid's default looks up the host name, which can hang.
+    msg["Message-ID"] = make_msgid(domain=settings["from"].rpartition("@")[2] or "devfeed")
+    msg.set_content(body, charset="utf-8")
+    return msg
+
+
+def send_digest(msg, settings):
+    host, port = settings["host"], settings["port"]
+    # smtplib's default context skips certificate checks; this one verifies the server.
+    context = ssl.create_default_context()
+    if port == 465:
+        conn = smtplib.SMTP_SSL(host, port, timeout=30, context=context)
+    else:
+        conn = smtplib.SMTP(host, port, timeout=30)
+    sent = False
+    try:
+        with conn as s:
+            if port != 465:
+                s.starttls(context=context)
+            s.login(settings["user"], settings["password"])
+            s.send_message(msg)
+            sent = True
+    except Exception as e:
+        if not sent:
+            raise
+        # The server already accepted the mail; only the goodbye failed.
+        log(f"digest: sent, but closing the connection failed ({type(e).__name__})")
+
+
+def scrub(text, password, user):
+    """`text` with the password hidden, including the escaped and base64
+    forms a server response or a bytes repr can carry."""
+    forms = {password, repr(password)[1:-1], repr(password.encode())[2:-1],
+             base64.b64encode(password.encode()).decode(),
+             base64.b64encode(f"\0{user}\0{password}".encode()).decode()}
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, "***")
+    return text
+
+
+def digest(cfg, config_path, dry_run):
+    """Collect once, render the digest and send it (or print it). Returns the
+    exit code. State is only written after the mail server accepted it."""
+    settings = None if dry_run else digest_settings(cfg)
+    active_days = digest_active_days(cfg)
+    try:
+        collected = collect_safely(cfg)
+    except SystemExit as e:
+        # gh missing: still worth mailing the last feed, marked stale.
+        log(f"ERROR: {e.code}")
+        collected = False
+    try:
+        with open(OUT_PATH) as f:
+            feed = json.load(f)
+        end = parse_ts(feed["generated_at"])
+    except Exception as e:
+        log(f"digest: no feed to send ({type(e).__name__}: {OUT_PATH})")
+        return 1
+    if feed.get("demo"):
+        log(f"digest: {OUT_PATH} holds demo data (from `devfeed.py demo`); not sending it")
+        return 1
+    now = datetime.now(timezone.utc)
+    stale = None if collected else max(round((now - end).total_seconds() / 3600), 0)
+    state = digest_state_path(config_path)
+    since = read_window_start(state, end)
+    subject, body = render_digest(feed, since, now, active_days, stale)
+    if dry_run:
+        print(f"Subject: {subject}\n\n{body}", end="")
+        return 0
+    try:
+        send_digest(build_message(subject, body, settings, now), settings)
+    except Exception as e:
+        # Never let the password reach the log, whatever the server echoed back.
+        log(f"digest: send failed: {type(e).__name__}: "
+            f"{scrub(str(e), settings['password'], settings['user'])}")
+        return 1
+    try:
+        write_state(state, feed["generated_at"], now)
+    except OSError as e:
+        log(f"digest: sent, but couldn't save {state} ({type(e).__name__}); "
+            "the next digest will repeat this window")
+        return 1
+    log(f"digest sent to {', '.join(settings['to'])}: {subject}")
+    return 0
+
+
 class Server(http.server.ThreadingHTTPServer):
     """HTTPServer.server_bind does a reverse-DNS lookup of the bind address,
     which can hang for a long time when DNS is slow. Nothing here needs it."""
@@ -697,12 +1024,20 @@ def serve(cfg, collecting=True):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("command", choices=["collect", "serve", "demo"])
+    p.add_argument("command", choices=["collect", "serve", "demo", "digest"])
     p.add_argument("--config", default=os.environ.get("DEVFEED_CONFIG")
                    or os.path.join(ROOT, "config.json"),
                    help="path to config.json (default: next to this script)")
     p.add_argument("--port", type=int, help="override the port from config.json")
+    p.add_argument("--dry-run", action="store_true", help="digest: print the email, don't send it")
+    p.add_argument("--demo", action="store_true", help="digest: render made-up data, no GitHub")
     args = p.parse_args()
+    if args.command == "digest" and args.demo:
+        f = demo_feed()
+        end = parse_ts(f["generated_at"])
+        subject, body = render_digest(f, end - timedelta(hours=24), end)
+        print(f"Subject: {subject}\n\n{body}", end="")
+        return
     if args.command == "demo":
         os.makedirs(PUBLIC, exist_ok=True)
         with open(OUT_PATH, "w") as f:
@@ -716,6 +1051,8 @@ def main():
         cfg["port"] = args.port
     if args.command == "collect":
         sys.exit(0 if collect_safely(cfg) else 1)
+    if args.command == "digest":
+        sys.exit(digest(cfg, args.config, args.dry_run))
     serve(cfg)
 
 

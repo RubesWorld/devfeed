@@ -1,5 +1,7 @@
 config.json
 public/feed.json
 public/feed.json.tmp
+digest-state.json
+digest-state.json.*.tmp
 __pycache__/
 .DS_Store

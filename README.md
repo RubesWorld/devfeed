@@ -21,6 +21,8 @@ you last looked.
   it unblocks, which files it shares with other cards, and which cards shouldn't be
   built at the same time. Structure, not feature priority. See below.
 - **Ship Log.** A second, calmer view: everything shipped, by project and day.
+- **Morning digest.** An optional plain-text email: per active repo, where you left off,
+  what's next and what's waiting on you, plus what changed since the last one. See below.
 
 ![The Ship Log view](docs/shiplog.png)
 
@@ -72,6 +74,7 @@ for macOS, a systemd unit for Linux, and a cron line if you'd rather serve
 | `ignore_branches` | `[]` | Branch names that aren't work in progress. |
 | `repos` | `[]` | Per-repo overrides: `display` name, colour `slot` (1–8) and `pin: true` to show it even when quiet. |
 | `board` | `null` | A GitHub Projects board, see below. |
+| `digest` | — | Email settings for `devfeed.py digest`, see below. |
 
 ### Project board
 
@@ -140,6 +143,45 @@ instead, and those only count as shared when it's the exact same file.
 before `active_columns`), `hold_labels` (a trailing `:` matches as a prefix, so `risk:`
 holds `risk:auth`), `depends_heading` (`"Depends on"`), `touches_heading` (`"Touches"`)
 and `size_prefix` (`"size:"`).
+
+## Digest
+
+`python3 devfeed.py digest` collects once and emails a short re-entry note: for each
+repo with activity in the last `active_days` (or something waiting on you), where you
+left off, the next action (fix, merge or review a PR, or Next up's card) and everything
+waiting on you, each with a tappable link. Then "while you were away": merges, new PRs
+and board moves since the last digest. If nothing needs you, the email is one line.
+
+```sh
+python3 devfeed.py digest --demo      # made-up data, printed; no GitHub, config or email
+python3 devfeed.py digest --dry-run   # your real digest, printed, nothing sent
+python3 devfeed.py digest             # send it
+```
+
+Add a `digest` block to `config.json`:
+
+```json
+"digest": {
+  "to": "you@example.com",
+  "active_days": 7,
+  "smtp": { "host": "smtp.gmail.com", "port": 587, "user": "you@gmail.com" }
+}
+```
+
+`to` takes a string or a list. `smtp.port` defaults to 587 (STARTTLS); 465 uses SSL.
+`smtp.from` defaults to `smtp.user`. The password is read from the
+`DEVFEED_SMTP_PASSWORD` environment variable, or else `smtp.password`. With Gmail, turn
+on 2-Step Verification and create an [app password](https://myaccount.google.com/apppasswords);
+your normal password won't work.
+
+devfeed doesn't schedule anything. [`examples/`](examples) has a cron line and a launchd
+agent that send it at 07:30 every day. The last sent window is kept in
+`digest-state.json` next to `config.json` (gitignored, never served), so each digest
+covers what happened since the previous one. If GitHub can't be reached, the digest is
+built from the last `feed.json` and says how old it is.
+
+The email contains your private repo names, PR titles and card titles, and passes
+through your mail provider. Send it only to an inbox you'd trust with that.
 
 ## Limits
 
