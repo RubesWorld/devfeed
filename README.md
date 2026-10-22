@@ -148,14 +148,21 @@ and `size_prefix` (`"size:"`).
 
 `python3 devfeed.py digest` collects once and emails a short re-entry note: for each
 repo with activity in the last `active_days` (or something waiting on you), where you
-left off, the next action (fix, merge or review a PR, or Next up's card) and everything
-waiting on you, each with a tappable link. Then "while you were away": merges, new PRs
-and board moves since the last digest. If nothing needs you, the email is one line.
+left off and everything waiting on you (PRs to fix, merge or review, and cards that need
+you), or Next up's card when nothing is waiting, each with a tappable link. Repos with nothing waiting share one
+"Also active" line. Then "while you were away": merges, new PRs and board moves since
+the last digest. If nothing needs you, the email is one line.
+
+The email is HTML styled like the page's dark Feed view (tables and inline styles, no
+images or remote fonts), with a plain-text version for mail apps that prefer it.
 
 ```sh
 python3 devfeed.py digest --demo      # made-up data, printed; no GitHub, config or email
 python3 devfeed.py digest --dry-run   # your real digest, printed, nothing sent
 python3 devfeed.py digest             # send it
+
+# Preview the HTML part in a browser (add --html to --demo or --dry-run):
+python3 devfeed.py digest --demo --html > /tmp/digest.html && open /tmp/digest.html
 ```
 
 Add a `digest` block to `config.json`:
@@ -169,7 +176,8 @@ Add a `digest` block to `config.json`:
 ```
 
 `to` takes a string or a list. `smtp.port` defaults to 587 (STARTTLS); 465 uses SSL.
-`smtp.from` defaults to `smtp.user`. The password is read from the
+`smtp.from` defaults to `smtp.user`. Optional `page_url` (your devfeed page, e.g.
+`http://your-machine:8300/`) adds an "open devfeed" link to the email. The password is read from the
 `DEVFEED_SMTP_PASSWORD` environment variable, or else `smtp.password`. With Gmail, turn
 on 2-Step Verification and create an [app password](https://myaccount.google.com/apppasswords);
 your normal password won't work.
