@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS: email the morning digest every day at 07:30, weekends included.
+         Replace /path/to/devfeed and the password, copy to ~/Library/LaunchAgents/, then:
+         launchctl load ~/Library/LaunchAgents/com.example.devfeed-digest.plist
+         A Mac that was asleep at 07:30 sends it when it wakes. -->
+    <key>Label</key>
+    <string>com.example.devfeed-digest</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/path/to/devfeed/devfeed.py</string>
+        <string>digest</string>
+    </array>
+    <!-- No Weekday key, so it runs daily. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <!-- launchd's PATH is minimal; gh usually lives in Homebrew's bin. Or leave out
+         DEVFEED_SMTP_PASSWORD and set digest.smtp.password in config.json. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>DEVFEED_SMTP_PASSWORD</key>
+        <string>your-app-password</string>
+    </dict>
+    <key>StandardErrorPath</key>
+    <string>/tmp/devfeed-digest.log</string>
+</dict>
+</plist>

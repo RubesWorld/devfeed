@@ -9,6 +9,11 @@
   "hide": [],
   "ignore_branches": [],
   "board": null,
+  "digest": {
+    "to": "you@example.com",
+    "active_days": 7,
+    "smtp": { "host": "smtp.gmail.com", "port": 587, "user": "you@gmail.com" }
+  },
   "repos": [
     { "repo": "your-github-username/main-project", "display": "Main Project", "slot": 1, "pin": true }
   ]
