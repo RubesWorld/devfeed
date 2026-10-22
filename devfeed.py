@@ -24,6 +24,7 @@ red when it goes stale, so a broken collector is visible on the page itself.
 """
 
 import argparse
+import base64
 import functools
 import http.server
 import json
@@ -32,8 +33,10 @@ import re
 import shutil
 import smtplib
 import socketserver
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -524,6 +527,8 @@ def daily_counts(commit_ts, days):
 
 
 def collect(cfg):
+    # Stamped before fetching, so anything that lands mid-run falls in the next digest's window.
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     since = utc_cutoff(cfg["days"])
     ignored = set(cfg["ignore_branches"])
 
@@ -544,7 +549,7 @@ def collect(cfg):
         })
 
     feed = {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "interval_minutes": cfg["interval_minutes"],
         "spark_days": cfg["spark_days"],
         "days": cfg["days"],
@@ -809,8 +814,10 @@ def digest_settings(cfg):
         sys.exit("digest: add a \"digest\" block to config.json (see config.example.json)")
     smtp = d.get("smtp") or {}
     to = d.get("to")
-    to = [to] if isinstance(to, str) else list(to or [])
-    to = [a.strip() for a in to if a and a.strip()]
+    to = [to] if isinstance(to, str) else to or []
+    if not isinstance(to, list) or not all(isinstance(a, str) for a in to):
+        sys.exit("digest: digest.to must be an address or a list of addresses")
+    to = [a.strip() for a in to if a.strip()]
     if not to:
         sys.exit("digest: config.json is missing digest.to")
     for key in ("host", "user"):
@@ -820,8 +827,21 @@ def digest_settings(cfg):
     if not password:
         sys.exit("digest: no SMTP password: set DEVFEED_SMTP_PASSWORD or digest.smtp.password")
     return {"to": to, "from": smtp.get("from") or smtp["user"], "host": smtp["host"],
-            "port": int(smtp.get("port") or 587), "user": smtp["user"], "password": password,
-            "active_days": d.get("active_days", 7)}
+            "port": config_int(smtp.get("port") or 587, "digest.smtp.port"), "user": smtp["user"],
+            "password": password, "active_days": digest_active_days(cfg)}
+
+
+def config_int(value, key):
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return int(value)
+    except (TypeError, ValueError):
+        sys.exit(f"digest: {key} must be a whole number, not {value!r}")
+
+
+def digest_active_days(cfg):
+    return config_int((cfg.get("digest") or {}).get("active_days", 7), "digest.active_days")
 
 
 def digest_state_path(config_path):
@@ -850,11 +870,26 @@ def read_window_start(path, end):
 
 
 def write_state(path, window_end, sent_at):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"last_window_end": window_end,
-                   "last_sent_at": sent_at.strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
-    os.replace(tmp, path)
+    """Atomic, and never moves the window backwards: when an overlapping run
+    with a newer feed already wrote, its window end stays."""
+    try:
+        with open(path) as f:
+            if parse_ts(json.load(f)["last_window_end"]) >= parse_ts(window_end):
+                return
+    except Exception:
+        pass
+    # A tmp file per run, so overlapping runs never replace each other's.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"last_window_end": window_end,
+                       "last_sent_at": sent_at.strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def build_message(subject, body, settings, now):
@@ -871,22 +906,49 @@ def build_message(subject, body, settings, now):
 
 def send_digest(msg, settings):
     host, port = settings["host"], settings["port"]
+    # smtplib's default context skips certificate checks; this one verifies the server.
+    context = ssl.create_default_context()
     if port == 465:
-        conn = smtplib.SMTP_SSL(host, port, timeout=30)
+        conn = smtplib.SMTP_SSL(host, port, timeout=30, context=context)
     else:
         conn = smtplib.SMTP(host, port, timeout=30)
-    with conn as s:
-        if port != 465:
-            s.starttls()
-        s.login(settings["user"], settings["password"])
-        s.send_message(msg)
+    sent = False
+    try:
+        with conn as s:
+            if port != 465:
+                s.starttls(context=context)
+            s.login(settings["user"], settings["password"])
+            s.send_message(msg)
+            sent = True
+    except Exception as e:
+        if not sent:
+            raise
+        # The server already accepted the mail; only the goodbye failed.
+        log(f"digest: sent, but closing the connection failed ({type(e).__name__})")
+
+
+def scrub(text, password, user):
+    """`text` with the password hidden, including the escaped and base64
+    forms a server response or a bytes repr can carry."""
+    forms = {password, repr(password)[1:-1], repr(password.encode())[2:-1],
+             base64.b64encode(password.encode()).decode(),
+             base64.b64encode(f"\0{user}\0{password}".encode()).decode()}
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, "***")
+    return text
 
 
 def digest(cfg, config_path, dry_run):
     """Collect once, render the digest and send it (or print it). Returns the
     exit code. State is only written after the mail server accepted it."""
     settings = None if dry_run else digest_settings(cfg)
-    collected = collect_safely(cfg)
+    active_days = digest_active_days(cfg)
+    try:
+        collected = collect_safely(cfg)
+    except SystemExit as e:
+        # gh missing: still worth mailing the last feed, marked stale.
+        log(f"ERROR: {e.code}")
+        collected = False
     try:
         with open(OUT_PATH) as f:
             feed = json.load(f)
@@ -894,11 +956,13 @@ def digest(cfg, config_path, dry_run):
     except Exception as e:
         log(f"digest: no feed to send ({type(e).__name__}: {OUT_PATH})")
         return 1
+    if feed.get("demo"):
+        log(f"digest: {OUT_PATH} holds demo data (from `devfeed.py demo`); not sending it")
+        return 1
     now = datetime.now(timezone.utc)
     stale = None if collected else max(round((now - end).total_seconds() / 3600), 0)
     state = digest_state_path(config_path)
     since = read_window_start(state, end)
-    active_days = (cfg.get("digest") or {}).get("active_days", 7)
     subject, body = render_digest(feed, since, now, active_days, stale)
     if dry_run:
         print(f"Subject: {subject}\n\n{body}", end="")
@@ -907,9 +971,15 @@ def digest(cfg, config_path, dry_run):
         send_digest(build_message(subject, body, settings, now), settings)
     except Exception as e:
         # Never let the password reach the log, whatever the server echoed back.
-        log(f"digest: send failed: {type(e).__name__}: {str(e).replace(settings['password'], '***')}")
+        log(f"digest: send failed: {type(e).__name__}: "
+            f"{scrub(str(e), settings['password'], settings['user'])}")
         return 1
-    write_state(state, feed["generated_at"], now)
+    try:
+        write_state(state, feed["generated_at"], now)
+    except OSError as e:
+        log(f"digest: sent, but couldn't save {state} ({type(e).__name__}); "
+            "the next digest will repeat this window")
+        return 1
     log(f"digest sent to {', '.join(settings['to'])}: {subject}")
     return 0
 

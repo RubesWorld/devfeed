@@ -359,7 +359,7 @@ class Send(unittest.TestCase):
         ssl = self.mock_smtp("SMTP_SSL")
         plain = self.mock_smtp("SMTP")
         devfeed.send_digest(devfeed.build_message("s", "b\n", SETTINGS, NOW), {**SETTINGS, "port": 465})
-        ssl.assert_called_once_with("smtp.example.com", 465, timeout=30)
+        ssl.assert_called_once_with("smtp.example.com", 465, timeout=30, context=mock.ANY)
         ssl.return_value.login.assert_called_once_with("bot@example.com", PW)
         plain.assert_not_called()
 
