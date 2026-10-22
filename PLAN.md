@@ -17,7 +17,7 @@ Branch: agent/feat-3-morning-digest · Base: main · Spec: https://github.com/Ru
 - [x] `examples/crontab.txt` gains a daily `30 7 * * *` digest line, with a note on setting `DEVFEED_SMTP_PASSWORD` in the crontab. New `examples/com.example.devfeed-digest.plist` uses `StartCalendarInterval` Hour 7 Minute 30, with no Weekday key, so it runs daily.
 - [x] README gets a Digest section: config, Gmail app password, scheduling, and a warning that the email contains private repo titles.
 - [x] `tests/test_digest.py` covers: render from `demo_feed()`, the one-line case, the window filter, the verb choice, no-board feed, unicode titles, truncation, the stale-feed first line and state-file read fallbacks.
-- [x] `python3 -m py_compile devfeed.py && python3 -m unittest discover tests` passes on 3.9 and 3.13.
+- [ ] `python3 -m py_compile devfeed.py && python3 -m unittest discover tests` passes on 3.9 and 3.13. (3.9.6 and 3.14 pass locally; 3.13 is confirmed by CI on the PR)
 
 ## Edge cases → tests
 - First run / state file missing → window = generated_at − 24h → tests/test_digest.py::State.test_missing_state_falls_back_24h
