@@ -61,3 +61,4 @@ The first real digest arrived as one long column of plain text, with every link 
 - Slice 2 choices: `render_digest_html` takes the same arguments as `render_digest` plus `page_url`, not a model. `digest.page_url` may be http:// because the owner's own page is often on a LAN/Tailscale address; feed links stay https-only. A total cap of 25 away lines (DIGEST_AWAY_TOTAL) applies to text and HTML alike. Chip labels use &nbsp; so they don't wrap.
 - local-candidate: slice 3 | first-try pass: yes | ~20 lines
 - Done criteria verified: 89 tests pass on Python 3.9.6 and 3.14.7; `digest --demo --html` renders (screenshot at phone width checked). Still open: the manual real-client check (send to neburai5@gmail.com, view in the Gmail app).
+- Manual check done: a real send from a354353 to neburai5@gmail.com (live config, page_url set) viewed in the Gmail app; the user approved the look.
