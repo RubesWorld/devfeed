@@ -879,7 +879,11 @@ TABLE = 'width="100%" cellpadding="0" cellspacing="0" role="presentation"'
 
 
 def slot_color(slot):
-    return SLOT_DARK[((slot or SLOTS) - 1) % SLOTS + 1]
+    try:
+        n = int(slot or SLOTS)  # config.json may say "3" or 2.5
+    except (TypeError, ValueError):
+        n = SLOTS
+    return SLOT_DARK[(n - 1) % SLOTS + 1]
 
 
 def tint(color, alpha=0.18, bg=SURFACE):
@@ -1169,7 +1173,15 @@ def digest(cfg, config_path, dry_run, html=False):
     state = digest_state_path(config_path)
     since = read_window_start(state, end)
     subject, body = render_digest(feed, since, now, active_days, stale)
-    page = render_digest_html(feed, since, now, active_days, stale, page_url)
+    page = None
+    if html or not dry_run:
+        try:
+            page = render_digest_html(feed, since, now, active_days, stale, page_url)
+        except Exception as e:
+            # The text part is enough on its own; don't lose the whole email.
+            log(f"digest: HTML part failed ({type(e).__name__}: {e}); sending text only")
+            if html:
+                return 1
     if dry_run:
         print(page if html else f"Subject: {subject}\n\n{body}", end="")
         return 0
