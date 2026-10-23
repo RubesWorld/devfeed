@@ -218,7 +218,7 @@ class StaleFallback(CommandBase):
             except SystemExit as e:
                 self.fail(f"digest exited ({e}) instead of mailing the stale feed")
         self.assertEqual(code, 0)
-        body = self.smtp.return_value.send_message.call_args[0][0].get_content()
+        body = self.smtp.return_value.send_message.call_args[0][0].get_body(("plain",)).get_content()
         self.assertTrue(body.startswith("Couldn't refresh from GitHub; this is 9h old."))
 
 

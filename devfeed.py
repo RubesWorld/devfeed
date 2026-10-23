@@ -43,6 +43,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
+from html import escape
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
@@ -497,8 +498,13 @@ def discover(cfg):
     cutoff = utc_cutoff(cfg["active_days"])
     pushed = {}
     for owner in cfg["owners"]:
-        for r in gh("repo", "list", owner, "--limit", "200", "--no-archived", "--source",
-                    "--json", "nameWithOwner,pushedAt"):
+        listed = gh("repo", "list", owner, "--limit", "200", "--no-archived", "--source",
+                    "--json", "nameWithOwner,pushedAt")
+        # GitHub sometimes answers with an empty list instead of an error. Treat
+        # it as a failed fetch, or pins alone would replace a good feed.
+        if not listed:
+            raise RuntimeError(f"gh repo list {owner}: no repos returned; keeping the previous feed")
+        for r in listed:
             pushed[r["nameWithOwner"]] = r["pushedAt"]
     names = {n for n, ts in pushed.items() if ts and ts >= cutoff}
     names |= {n for n, o in overrides.items() if o.get("pin")}
@@ -671,6 +677,7 @@ DIGEST_TITLE = 80         # characters before a title is cut with …
 DIGEST_WAITING = 5        # waiting items shown per repo
 DIGEST_AWAY = 10          # "while you were away" items shown per repo
 DIGEST_REPOS = 15
+DIGEST_AWAY_TOTAL = 25    # "while you were away" lines across all repos
 
 
 def parse_ts(s):
@@ -689,9 +696,9 @@ def pr_verb(p):
     return "review"
 
 
-def render_digest(feed, since, now, active_days=7, stale_hours=None):
-    """The digest email as (subject, body), from a feed and the window start.
-    Pure: no I/O, so the caller decides the window, the clock and staleness."""
+def digest_model(feed, since, now, active_days=7, stale_hours=None):
+    """Everything the digest shows, as plain data, from a feed and the window
+    start. Pure: no I/O. The text and HTML renderers both read this."""
     end = parse_ts(feed["generated_at"])
     active_cutoff = now - timedelta(days=active_days)
     board = feed.get("board") or {}
@@ -700,8 +707,8 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
     def cut(title):
         return title if len(title) <= DIGEST_TITLE else title[:DIGEST_TITLE - 1] + "…"
 
-    def entry(text, url):
-        return [f"  - {text}", f"    {url}"]
+    def row(kind, ref, title, url):
+        return {"kind": kind, "ref": ref, "title": cut(title), "url": url}
 
     def in_window(s):
         return bool(s) and since < parse_ts(s) <= end
@@ -713,7 +720,7 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
 
     def block(name):
         if name not in blocks:
-            r = repos.get(name) or {"repo": name, "display": name.split("/")[-1],
+            r = repos.get(name) or {"repo": name, "display": name.split("/")[-1], "slot": SLOTS,
                                     "last_activity": None, "items": [], "open_prs": [],
                                     "branches": []}
             blocks[name] = {"repo": r, "waiting": [], "away": []}
@@ -724,86 +731,275 @@ def render_digest(feed, since, now, active_days=7, stale_hours=None):
         b = block(r["repo"])
         for p in r["open_prs"]:
             if not p["draft"]:
-                b["waiting"].append((f"{pr_verb(p)} {p['ref']} {cut(p['title'])}", p["url"]))
+                b["waiting"].append(row(pr_verb(p), p["ref"], p["title"], p["url"]))
         for i in r["items"]:
             if i["type"] == "merge" and in_window(i["ts"]):
-                b["away"].append((i["ts"], f"merged {i['ref']} {cut(i['title'])}", i["url"]))
+                b["away"].append((i["ts"], row("merged", i["ref"], i["title"], i["url"])))
                 counts["merge"] += 1
         for p in r["open_prs"]:
             if in_window(p.get("opened")):
-                b["away"].append((p["opened"], f"new PR {p['ref']} {cut(p['title'])}", p["url"]))
+                b["away"].append((p["opened"], row("new PR", p["ref"], p["title"], p["url"])))
                 counts["pr"] += 1
     for c in board.get("cards") or []:
         if c.get("needs_human") and c["status"] != "Done" and not c["closed"]:
-            block(c["repo"])["waiting"].append((f"{c['ref']} {cut(c['title'])}", c["url"]))
+            block(c["repo"])["waiting"].append(row("issue", c["ref"], c["title"], c["url"]))
         if in_window(c.get("since")):
-            block(c["repo"])["away"].append((c["since"], f"{c['ref']} → {c['status']}", c["url"]))
+            block(c["repo"])["away"].append((c["since"], row("moved", c["ref"], c["status"], c["url"])))
             counts["move"] += 1
 
     waiting_total = sum(len(b["waiting"]) for b in blocks.values())
     day = now.astimezone().strftime("%a %d %b")
-    subject = f"devfeed: {waiting_total} need you · {day}" if waiting_total \
-        else f"devfeed: all clear · {day}"
-    lines = [f"Couldn't refresh from GitHub; this is {stale_hours}h old."] \
-        if stale_hours is not None else []
-    since_s = local_time(since)
-
+    model = {
+        "subject": f"devfeed: {waiting_total} need you · {day}" if waiting_total
+        else f"devfeed: all clear · {day}",
+        "day": day, "since": local_time(since), "stale_hours": stale_hours,
+        "waiting_total": waiting_total, "summary": None,
+        "repos": [], "more_repos": 0, "quiet": [], "more_quiet": 0, "away": [],
+    }
     if not waiting_total:
         if any(counts.values()):
             parts = [f"{counts['merge']} merge{'s' * (counts['merge'] != 1)}",
                      f"{counts['pr']} new PR{'s' * (counts['pr'] != 1)}",
                      f"{counts['move']} board move{'s' * (counts['move'] != 1)}"]
-            lines.append(f"Nothing needs you. Since {since_s}: {', '.join(parts)}.")
+            model["summary"] = f"Nothing needs you. Since {model['since']}: {', '.join(parts)}."
         else:
-            lines.append(f"Nothing needs you, and nothing changed since {since_s}.")
-        return subject, "\n".join(lines) + "\n"
+            model["summary"] = f"Nothing needs you, and nothing changed since {model['since']}."
+        return model
 
     def recent(b):
         return b["repo"]["last_activity"] or ""
+
+    def head(r):
+        return {"repo": r["repo"], "display": r["display"], "slot": r.get("slot") or SLOTS,
+                "url": f"https://github.com/{r['repo']}"}
 
     active = [b for b in blocks.values() if b["waiting"]
               or (b["repo"]["last_activity"] and parse_ts(b["repo"]["last_activity"]) >= active_cutoff)]
     active.sort(key=recent, reverse=True)
     active.sort(key=lambda b: not b["waiting"])
-    if lines:
-        lines.append("")
-    for b in active[:DIGEST_REPOS]:
+    full, quiet = [], []
+    for b in active:
         r = b["repo"]
-        lines.append(f"{r['display']} ({r['repo']})")
+        # Next only when it says something the waiting rows don't: a waiting PR
+        # would just repeat the first row, so it's the build-next card or nothing.
+        bn = build_next.get(r["repo"])
+        nxt = row("build", bn["ref"], bn["title"], bn["url"]) \
+            if bn and not any(not p["draft"] for p in r["open_prs"]) else None
+        if not b["waiting"] and not nxt:
+            quiet.append(head(r))
+            continue
         last = (r["branches"][:1] and r["branches"][0]) or (r["items"][:1] and r["items"][0])
-        if last:
-            where = last.get("branch") or last["ref"]
-            lines += [f"  Left off: {cut(last['title'])} ({where})", f"    {last['url']}"]
-        nxt = next((p for p in r["open_prs"] if not p["draft"]), None)
-        if nxt:
-            lines += [f"  Next: {pr_verb(nxt)} {nxt['ref']} {cut(nxt['title'])}",
-                      f"    {nxt['url']}"]
-        elif r["repo"] in build_next:
-            bn = build_next[r["repo"]]
-            lines += [f"  Next: build {bn['ref']} {cut(bn['title'])}", f"    {bn['url']}"]
-        if b["waiting"]:
-            lines.append("  Waiting on you:")
-            for text, url in b["waiting"][:DIGEST_WAITING]:
-                lines += entry(text, url)
-            if len(b["waiting"]) > DIGEST_WAITING:
-                lines.append(f"  +{len(b['waiting']) - DIGEST_WAITING} more")
-        lines.append("")
-    if len(active) > DIGEST_REPOS:
-        lines += [f"+{len(active) - DIGEST_REPOS} more repos", ""]
+        left_off = {"title": cut(last["title"]), "where": last.get("branch") or last["ref"],
+                    "url": last["url"]} if last else None
+        full.append({**head(r), "left_off": left_off, "next": nxt,
+                     "waiting_count": len(b["waiting"]),
+                     "waiting": b["waiting"][:DIGEST_WAITING],
+                     "more": max(len(b["waiting"]) - DIGEST_WAITING, 0)})
+    model["repos"], model["more_repos"] = full[:DIGEST_REPOS], max(len(full) - DIGEST_REPOS, 0)
+    model["quiet"], model["more_quiet"] = quiet[:DIGEST_REPOS], max(len(quiet) - DIGEST_REPOS, 0)
 
-    lines.append(f"While you were away (since {since_s})")
     away = [b for b in blocks.values() if b["away"]]
     away.sort(key=lambda b: max(a[0] for a in b["away"]), reverse=True)
+    room, model["more_away"] = DIGEST_AWAY_TOTAL, 0
     for b in away:
-        lines.append(b["repo"]["display"])
-        events = sorted(b["away"], reverse=True)
-        for _, text, url in events[:DIGEST_AWAY]:
-            lines += entry(text, url)
-        if len(events) > DIGEST_AWAY:
-            lines.append(f"  +{len(events) - DIGEST_AWAY} more")
-    if not away:
+        events = [e for _, e in sorted(b["away"], key=lambda a: a[0], reverse=True)]
+        shown = events[:min(DIGEST_AWAY, room)]
+        if not shown:
+            model["more_away"] += len(events)
+            continue
+        room -= len(shown)
+        model["away"].append({**head(b["repo"]), "events": shown,
+                              "more": len(events) - len(shown)})
+    return model
+
+
+def away_text(e):
+    if e["kind"] == "moved":
+        return f"{e['ref']} → {e['title']}"
+    return f"{e['kind']} {e['ref']} {e['title']}"
+
+
+def row_text(w):
+    return f"{w['ref']} {w['title']}" if w["kind"] == "issue" else f"{w['kind']} {w['ref']} {w['title']}"
+
+
+def render_digest(feed, since, now, active_days=7, stale_hours=None):
+    """The digest email as (subject, plain-text body). Pure: no I/O."""
+    m = digest_model(feed, since, now, active_days, stale_hours)
+    lines = [f"Couldn't refresh from GitHub; this is {stale_hours}h old."] \
+        if stale_hours is not None else []
+    if m["summary"]:
+        return m["subject"], "\n".join(lines + [m["summary"]]) + "\n"
+    if lines:
+        lines.append("")
+    for r in m["repos"]:
+        waiting = f" · {r['waiting_count']} waiting" if r["waiting_count"] else ""
+        lines.append(f"{r['display']} ({r['repo']}){waiting}")
+        if r["left_off"]:
+            lines.append(f"  Left off: {r['left_off']['title']} ({r['left_off']['where']})")
+        if r["next"]:
+            lines += [f"  Next: {row_text(r['next'])}", f"    {r['next']['url']}"]
+        for w in r["waiting"]:
+            lines += [f"  - {row_text(w)}", f"    {w['url']}"]
+        if r["more"]:
+            lines.append(f"  +{r['more']} more")
+        lines.append("")
+    if m["more_repos"]:
+        lines += [f"+{m['more_repos']} more repos", ""]
+    if m["quiet"]:
+        more = f" +{m['more_quiet']} more" if m["more_quiet"] else ""
+        lines += [f"Also active: {', '.join(q['display'] for q in m['quiet'])}{more}", ""]
+
+    lines.append(f"While you were away (since {m['since']})")
+    for a in m["away"]:
+        lines += [f"  {a['display']} · {away_text(e)}" for e in a["events"]]
+        if a["more"]:
+            lines.append(f"  {a['display']} · +{a['more']} more")
+    if m["more_away"]:
+        lines.append(f"  +{m['more_away']} more in other repos")
+    if not m["away"]:
         lines.append("  Nothing changed.")
-    return subject, "\n".join(lines) + "\n"
+    return m["subject"], "\n".join(lines) + "\n"
+
+
+# The page's dark Feed view (public/index.html), as inline styles: email
+# clients drop <style> blocks and external fonts often enough not to rely on
+# them. The sans stack is set once on the wrapper and inherited.
+INK, INK2, MUTED, PAGE, SURFACE, GRID = "#ffffff", "#c3c2b7", "#898781", "#0d0d0d", "#1a1a19", "#2c2c2a"
+GOOD, CRITICAL, WARN, NEW = "#0ca30c", "#d03b3b", "#c98500", "#3987e5"
+SLOT_DARK = {1: "#3987e5", 2: "#d95926", 3: "#199e70", 4: "#c98500",
+             5: "#9b6fe0", 6: "#d9468f", 7: "#2fa7b8", 8: "#8a9a3a"}
+SANS = "'Space Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+MONO = "'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace"
+CHIP_MONO = "'IBM Plex Mono',Menlo,monospace"   # short: chips repeat on every row
+TAGS = {"review": ("review", NEW), "fix": ("fix", CRITICAL), "merge": ("merge", GOOD),
+        "issue": ("needs you", WARN), "build": ("build next", MUTED),
+        "merged": ("merged", GOOD), "new PR": ("new PR", NEW), "moved": ("moved", MUTED)}
+TABLE = 'width="100%" cellpadding="0" cellspacing="0" role="presentation"'
+
+
+def slot_color(slot):
+    try:
+        n = int(slot or SLOTS)  # config.json may say "3" or 2.5
+    except (TypeError, ValueError):
+        n = SLOTS
+    return SLOT_DARK[(n - 1) % SLOTS + 1]
+
+
+def tint(color, alpha=0.18, bg=SURFACE):
+    """`color` laid over `bg` at `alpha`, as a solid hex (no rgba in email)."""
+    c, b = (tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) for h in (color, bg))
+    return "#" + "".join(f"{round(x * alpha + y * (1 - alpha)):02x}" for x, y in zip(c, b))
+
+
+def link(text, url, color, schemes=("https://",)):
+    """Escaped link text; the href only for the allowed schemes, else plain text."""
+    if url.startswith(schemes):
+        return f'<a href="{escape(url)}" style="color:{color};text-decoration:none">{escape(text)}</a>'
+    return f'<span style="color:{color}">{escape(text)}</span>'
+
+
+def chip(text, color, bg=None):
+    """A small mono label: bordered like the page's pills, or filled like its #ref badges."""
+    look = f"background:{bg}" if bg else f"border:1px solid {color}"
+    return (f'<span style="padding:1px 6px;{look};border-radius:4px;font:11px {CHIP_MONO};'
+            f'color:{color}">{escape(text).replace(" ", "&nbsp;")}</span>')
+
+
+def tag(kind):
+    return chip(*TAGS[kind])
+
+
+def render_digest_html(feed, since, now, active_days=7, stale_hours=None, page_url=None):
+    """The digest email's HTML part, styled like the page's Feed view: tables
+    and inline styles only, every string escaped, https links only. Pure."""
+    m = digest_model(feed, since, now, active_days, stale_hours)
+    out = []
+    add = out.append
+    meta = f"font:12px/1.5 {MONO};color:{MUTED}"
+    if page_url and page_url.startswith(("https://", "http://")):
+        opened = " · " + link("open devfeed ↗", page_url, INK2, ("https://", "http://"))
+    else:
+        opened = ""
+    dot = CRITICAL if m["waiting_total"] else GOOD
+    pill = f"{m['waiting_total']} need you" if m["waiting_total"] else "all clear"
+    add(f'<tr><td style="padding:0 0 18px"><table {TABLE}><tr><td width="38">'
+        f'<div style="width:36px;line-height:36px;text-align:center;background:{SURFACE};'
+        f'border:1px solid {GRID};border-radius:9px;font-size:18px">◆</div></td>'
+        f'<td style="padding-left:10px"><div style="font-size:19px;font-weight:600;line-height:1.2">Dev Feed</div>'
+        f'<div style="{meta}">{escape(m["day"])}{opened}</div></td>'
+        f'<td align="right" style="white-space:nowrap"><span style="display:inline-block;padding:5px 11px;'
+        f'background:{SURFACE};border:1px solid {GRID};border-radius:99px;font:12px {MONO};color:{INK2}">'
+        f'<span style="color:{dot}">●</span> {pill}</span></td></tr></table></td></tr>')
+    if stale_hours is not None:
+        add(f'<tr><td style="padding:0 0 12px;font-size:13px;color:{CRITICAL}">'
+            f'{escape(f"Couldn{chr(39)}t refresh from GitHub; this is {stale_hours}h old.")}</td></tr>')
+
+    card = f'{TABLE} bgcolor="{SURFACE}" style="background:{SURFACE};border:1px solid {GRID};border-radius:10px'
+    if m["summary"]:
+        add(f'<tr><td><table {card}"><tr><td style="padding:16px;font-size:14px;color:{INK2}">'
+            f'{escape(m["summary"])}</td></tr></table></td></tr>')
+
+    line = f"border-top:1px solid {GRID}"
+    for r in m["repos"]:
+        slot = slot_color(r["slot"])
+        count = (f'<td align="right" style="padding:13px 16px 4px 0;font:12px {MONO};color:{WARN};'
+                 f'white-space:nowrap">{r["waiting_count"]} waiting</td>') if r["waiting_count"] else "<td></td>"
+        rows = [f'<tr><td colspan="2" style="padding:13px 0 4px 14px;font-size:16px;font-weight:600">'
+                f'{link(r["display"], r["url"], INK)}</td>{count}</tr>']
+        if r["left_off"]:
+            lo = r["left_off"]
+            rows.append(f'<tr><td colspan="3" style="padding:0 16px 10px 14px;{meta}">Left off '
+                        f'{link(lo["title"], lo["url"], INK2)} · {escape(lo["where"])}</td></tr>')
+        for w in ([r["next"]] if r["next"] else []) + r["waiting"]:
+            rows.append(f'<tr><td width="1" nowrap valign="top" style="padding:9px 10px 9px 14px;{line}">'
+                        f'{tag(w["kind"])}</td><td valign="top" style="padding:8px 0;{line};font-size:14px">'
+                        f'{link(w["title"], w["url"], INK)}</td><td width="1" nowrap valign="top" '
+                        f'style="padding:9px 16px 9px 10px;{line}">{chip(w["ref"], slot, tint(slot))}</td></tr>')
+        if r["more"]:
+            rows.append(f'<tr><td colspan="3" style="padding:8px 14px;{line};{meta}">+{r["more"]} more</td></tr>')
+        add(f'<tr><td style="padding:0 0 12px"><table {card};border-left:3px solid {slot}">'
+            f'{"".join(rows)}<tr><td colspan="3" height="4"></td></tr></table></td></tr>')
+    if m["more_repos"]:
+        add(f'<tr><td style="padding:0 0 12px;{meta}">+{m["more_repos"]} more repos</td></tr>')
+
+    def section(title):
+        return (f'<tr><td style="padding:10px 0 8px;font:500 11px {MONO};letter-spacing:0.12em;'
+                f'text-transform:uppercase;color:{MUTED}">{title}</td></tr>')
+
+    if m["quiet"]:
+        names = ", ".join(link(q["display"], q["url"], slot_color(q["slot"])) for q in m["quiet"])
+        more = f' <span style="color:{MUTED}">+{m["more_quiet"]} more</span>' if m["more_quiet"] else ""
+        add(section("Also active"))
+        add(f'<tr><td style="padding:0 0 12px;font-size:14px;color:{INK2}">{names}{more}</td></tr>')
+
+    if not m["summary"]:
+        add(section(f"While you were away · since {escape(m['since'])}"))
+        lines = []
+        for a in m["away"]:
+            name = f'<b>{link(a["display"], a["url"], slot_color(a["slot"]))}</b>'
+            for e in a["events"]:
+                text = f"{e['ref']} → {e['title']}" if e["kind"] == "moved" else f"{e['ref']} {e['title']}"
+                lines.append(f"{name} {tag(e['kind'])} {link(text, e['url'], INK2)}")
+            if a["more"]:
+                lines.append(f'{name} <span style="color:{MUTED}">+{a["more"]} more</span>')
+        if m["more_away"]:
+            lines.append(f'<span style="color:{MUTED}">+{m["more_away"]} more in other repos</span>')
+        if not lines:
+            lines.append(f'<span style="color:{MUTED}">Nothing changed.</span>')
+        add("".join(f'<tr><td style="padding:4px 0;font-size:13px;color:{INK2}">{x}</td></tr>' for x in lines))
+
+    add(f'<tr><td style="padding:22px 0 0;font:11px {MONO};color:{MUTED}">devfeed · window since '
+        f'{escape(m["since"])}</td></tr>')
+    return (f'<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark">'
+            f'<title>{escape(m["subject"])}</title></head>'
+            f'<body bgcolor="{PAGE}" style="margin:0;padding:0;background:{PAGE}">'
+            f'<table {TABLE} bgcolor="{PAGE}" style="background:{PAGE}"><tr>'
+            f'<td align="center" style="padding:24px 12px;font-family:{SANS};line-height:1.45;color:{INK}">'
+            f'<table {TABLE} style="max-width:600px;font-family:{SANS};color:{INK}">'
+            f'{"".join(out)}</table></td></tr></table></body></html>\n')
 
 
 def digest_settings(cfg):
@@ -838,6 +1034,16 @@ def config_int(value, key):
         return int(value)
     except (TypeError, ValueError):
         sys.exit(f"digest: {key} must be a whole number, not {value!r}")
+
+
+def digest_page_url(cfg):
+    """Optional link to your own devfeed page, shown in the email's header."""
+    url = (cfg.get("digest") or {}).get("page_url")
+    if url is None or url == "":
+        return None
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        sys.exit("digest: digest.page_url must start with http:// or https://")
+    return url
 
 
 def digest_active_days(cfg):
@@ -892,7 +1098,7 @@ def write_state(path, window_end, sent_at):
         raise
 
 
-def build_message(subject, body, settings, now):
+def build_message(subject, body, settings, now, html=None):
     msg = EmailMessage()
     msg["From"] = settings["from"]
     msg["To"] = ", ".join(settings["to"])
@@ -901,6 +1107,8 @@ def build_message(subject, body, settings, now):
     # An explicit domain: make_msgid's default looks up the host name, which can hang.
     msg["Message-ID"] = make_msgid(domain=settings["from"].rpartition("@")[2] or "devfeed")
     msg.set_content(body, charset="utf-8")
+    if html:
+        msg.add_alternative(html, subtype="html", charset="utf-8")
     return msg
 
 
@@ -938,11 +1146,12 @@ def scrub(text, password, user):
     return text
 
 
-def digest(cfg, config_path, dry_run):
+def digest(cfg, config_path, dry_run, html=False):
     """Collect once, render the digest and send it (or print it). Returns the
     exit code. State is only written after the mail server accepted it."""
     settings = None if dry_run else digest_settings(cfg)
     active_days = digest_active_days(cfg)
+    page_url = digest_page_url(cfg)
     try:
         collected = collect_safely(cfg)
     except SystemExit as e:
@@ -964,11 +1173,20 @@ def digest(cfg, config_path, dry_run):
     state = digest_state_path(config_path)
     since = read_window_start(state, end)
     subject, body = render_digest(feed, since, now, active_days, stale)
+    page = None
+    if html or not dry_run:
+        try:
+            page = render_digest_html(feed, since, now, active_days, stale, page_url)
+        except Exception as e:
+            # The text part is enough on its own; don't lose the whole email.
+            log(f"digest: HTML part failed ({type(e).__name__}: {e}); sending text only")
+            if html:
+                return 1
     if dry_run:
-        print(f"Subject: {subject}\n\n{body}", end="")
+        print(page if html else f"Subject: {subject}\n\n{body}", end="")
         return 0
     try:
-        send_digest(build_message(subject, body, settings, now), settings)
+        send_digest(build_message(subject, body, settings, now, page), settings)
     except Exception as e:
         # Never let the password reach the log, whatever the server echoed back.
         log(f"digest: send failed: {type(e).__name__}: "
@@ -1031,12 +1249,19 @@ def main():
     p.add_argument("--port", type=int, help="override the port from config.json")
     p.add_argument("--dry-run", action="store_true", help="digest: print the email, don't send it")
     p.add_argument("--demo", action="store_true", help="digest: render made-up data, no GitHub")
+    p.add_argument("--html", action="store_true",
+                   help="digest, with --demo or --dry-run: print the HTML part instead of the text")
     args = p.parse_args()
+    if args.html and not (args.command == "digest" and (args.demo or args.dry_run)):
+        sys.exit("--html only previews: use it with digest --demo or digest --dry-run")
     if args.command == "digest" and args.demo:
         f = demo_feed()
         end = parse_ts(f["generated_at"])
-        subject, body = render_digest(f, end - timedelta(hours=24), end)
-        print(f"Subject: {subject}\n\n{body}", end="")
+        if args.html:
+            print(render_digest_html(f, end - timedelta(hours=24), end), end="")
+        else:
+            subject, body = render_digest(f, end - timedelta(hours=24), end)
+            print(f"Subject: {subject}\n\n{body}", end="")
         return
     if args.command == "demo":
         os.makedirs(PUBLIC, exist_ok=True)
@@ -1052,7 +1277,7 @@ def main():
     if args.command == "collect":
         sys.exit(0 if collect_safely(cfg) else 1)
     if args.command == "digest":
-        sys.exit(digest(cfg, args.config, args.dry_run))
+        sys.exit(digest(cfg, args.config, args.dry_run, args.html))
     serve(cfg)
 
 

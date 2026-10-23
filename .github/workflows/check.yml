@@ -36,6 +36,11 @@ jobs:
       - name: Digest renders from the demo feed
         run: |
           python devfeed.py digest --demo | grep "^Subject: devfeed: 4 need you"
+      - name: HTML digest renders from the demo feed
+        run: |
+          python devfeed.py digest --demo --html > digest.html
+          head -c 15 digest.html | grep -q "<!doctype html>"
+          if grep -q 'href="http://' digest.html; then exit 1; fi
       - name: Missing config fails cleanly
         run: |
           if python devfeed.py collect --config nope.json; then exit 1; fi
