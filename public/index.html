@@ -131,6 +131,34 @@
   .entry.old { opacity: 0.62; }
   .entry.old:hover { opacity: 1; }
   .entry.new { box-shadow: inset 3px 0 0 var(--new); }
+  /* Swipe: left = seen (hidden here until it changes), right = move the card forward. */
+  .swipe { position: relative; border-radius: 10px; overflow: hidden; }
+  .swipe > .entry { position: relative; background: var(--d-page); touch-action: pan-y;
+    transition: transform 0.18s ease; -webkit-user-select: none; user-select: none; }
+  .swipe > .entry:hover { background: #151514; }
+  .swipe.dragging > .entry { transition: none; }
+  .swipe-bg { position: absolute; inset: 0; display: flex; align-items: center; padding: 0 18px;
+    font-size: 12.5px; font-weight: 600; border-radius: 10px; }
+  .swipe-bg span { opacity: 0; transition: opacity 0.12s; }
+  .swipe-bg .seen-l { margin-left: auto; color: var(--d-ink2); }
+  .swipe-bg .go { color: var(--good); }
+  .swipe[data-dir=left] .swipe-bg { background: var(--d-surface); }
+  .swipe[data-dir=right] .swipe-bg { background: rgba(12,163,12,0.16); }
+  .swipe[data-dir=left] .seen-l, .swipe[data-dir=right] .go { opacity: 0.45; }
+  .swipe.armed[data-dir=left] .seen-l, .swipe.armed[data-dir=right] .go { opacity: 1; }
+  .entry.is-seen { opacity: 0.42; }
+  .seen-toggle { align-self: flex-start; margin: 6px 0 0 13px; background: none; border: 0; padding: 4px 0;
+    font-size: 12px; color: var(--d-muted); cursor: pointer; }
+  .seen-toggle:hover { color: var(--d-ink2); }
+  #toast { position: fixed; left: 50%; transform: translateX(-50%); z-index: 20;
+    bottom: calc(18px + env(safe-area-inset-bottom)); max-width: calc(100% - 32px);
+    display: flex; align-items: center; gap: 16px; padding: 11px 16px; border-radius: 10px;
+    background: var(--d-surface); border: 1px solid var(--d-border); color: var(--d-ink);
+    font-size: 13.5px; box-shadow: 0 6px 24px rgba(0,0,0,0.45); }
+  #toast[hidden] { display: none; }
+  #toast.bad { border-color: var(--critical); }
+  #toast button { background: none; border: 0; padding: 0; font: inherit; font-weight: 600;
+    color: var(--new); cursor: pointer; }
   .entry .newtag { color: var(--new); font-weight: 600; }
   .since {
     margin-bottom: 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -240,6 +268,7 @@
 </div>
 <div id="tip"></div>
 
+<div id="toast" role="status" aria-live="polite" hidden></div>
 <script>
 'use strict';
 const SLOT_DARK  = { 1: '#3987e5', 2: '#d95926', 3: '#199e70', 4: '#c98500',
@@ -416,14 +445,30 @@ function prIcon(color) {
 function openWorkSection(title, rows) {
   const sec = el('div', 'openwork-sec');
   const head = el('div', 'dayhead');
-  head.append(el('div', 'kicker mono', title), el('div', 'rule'), el('div', 'count mono', String(rows.length)));
+  const unseen = rows.filter(r => !r.dataset.seen).length;
+  head.append(el('div', 'kicker mono', title), el('div', 'rule'), el('div', 'count mono', String(unseen)));
   const list = el('div', 'entries');
-  for (const row of rows) list.appendChild(row);
+  fillEntries(list, rows, title);
   sec.append(head, list);
   return sec;
 }
-function openWorkRow(it, icon, verb, flags, refText) {
+// Rows swiped "seen" are left out, with a toggle to bring them back (dimmed).
+function fillEntries(list, rows, title) {
+  const seen = rows.filter(r => r.dataset.seen).length;
+  const showing = showSeen.has(title);
+  for (const row of rows) if (showing || !row.dataset.seen) list.appendChild(row);
+  if (!seen) return;
+  const b = el('button', 'seen-toggle mono', showing ? 'hide ' + seen + ' seen' : seen + ' seen · show');
+  b.onclick = () => { showing ? showSeen.delete(title) : showSeen.add(title); render(); };
+  list.appendChild(b);
+}
+// `sw` makes the row swipeable: { key, stamp } for seen, plus `card` (a board card) to move it.
+function openWorkRow(it, icon, verb, flags, refText, sw) {
   const color = slotColor(it.repo.slot, false);
+  const move = sw && sw.card && sw.card.item && moves[sw.card.item];
+  if (move && move.state !== 'done') flags = [['moving to ' + move.to + '…', 'ok'], ...flags];
+  else if (sw && sw.card && movedTo(sw.card) && sw.card.status !== movedTo(sw.card))
+    flags = [['moved to ' + movedTo(sw.card), 'ok'], ...flags];
   const a = el('a', 'entry' + (isNew(it.newAt || it.ts) ? ' new' : '') + (it.old ? ' old' : ''));
   a.href = it.url; a.target = '_blank';
   a.appendChild(icon(color));
@@ -448,7 +493,159 @@ function openWorkRow(it, icon, verb, flags, refText) {
   const ref = el('span', 'ref mono', refText);
   ref.style.background = alpha(color, 0.14);
   a.append(ref, el('span', 'etime mono', it.ts ? rel(it.ts) : ''));
-  return a;
+  if (!sw) return a;
+  liveRowKeys.add(sw.key);
+  if (sw.key in seenRows && seenRows[sw.key] !== sw.stamp) {   // it changed: worth another look
+    delete seenRows[sw.key];
+    saveSeenRows();
+  }
+  const seen = seenRows[sw.key] === sw.stamp;
+  if (seen) a.classList.add('is-seen');
+  const to = sw.card && !sw.noMove ? advanceTo(sw.card) : null;
+  return swipeable(a,
+    seen ? { label: 'Unsee', run: () => unsee(sw.key) }
+         : { label: 'Seen ✓', run: () => markSeen(sw.key, sw.stamp, refText) },
+    to && { label: '→ ' + to, run: () => startMove(sw.card, to) }, seen);
+}
+
+/* ------- swipe: left = seen, right = move the card forward ------- */
+// Seen is per device: a row stays hidden until its stamp (whatever would make
+// it worth another look: a new commit, a new column, checks flipping) changes.
+// A move waits UNDO_MS for Undo, then goes to the server, which re-checks the
+// card against GitHub and only makes moves listed in board.advance.
+const SEEN_ROWS_KEY = 'devfeed-seen-rows';
+const UNDO_MS = 5000;
+let seenRows = {};
+try { seenRows = JSON.parse(localStorage.getItem(SEEN_ROWS_KEY) || '{}') || {}; } catch (e) {}
+function saveSeenRows() { try { localStorage.setItem(SEEN_ROWS_KEY, JSON.stringify(seenRows)); } catch (e) {} }
+const liveRowKeys = new Set();   // swipeable rows drawn this render, to prune old seen marks
+const showSeen = new Set();      // sections whose seen rows are shown
+const moves = {};                // board item -> { to, from, ref, state: pending|sending|done, at }
+
+function markSeen(key, stamp, ref) {
+  seenRows[key] = stamp;
+  saveSeenRows();
+  render();
+  toast('Seen ' + ref, () => { delete seenRows[key]; saveSeenRows(); render(); });
+}
+function unsee(key) {
+  delete seenRows[key];
+  saveSeenRows();
+  render();
+}
+// The column to move a card to, if a swipe may: allowed by the board, not held, not already moving.
+function advanceTo(c) {
+  const to = c.item && ((feed.board || {}).advance || {})[c.status];
+  return to && !c.held && !c.needs_human && !c.closed && !moves[c.item] ? to : null;
+}
+// A move the feed hasn't caught up with yet; dropped once a collect has run since.
+function movedTo(c) {
+  const m = c.item && moves[c.item];
+  if (!m || m.state !== 'done') return null;
+  if (!feed.demo && feed.generated_at > m.at) { delete moves[c.item]; return null; }
+  return m.to;
+}
+function startMove(c, to) {
+  const m = moves[c.item] = { to, from: c.status, ref: c.ref, state: 'pending' };
+  m.timer = setTimeout(() => sendMove(c.item), UNDO_MS);
+  render();
+  toast('Moving ' + c.ref + ' to ' + to, () => {
+    clearTimeout(m.timer);
+    if (moves[c.item] === m) delete moves[c.item];
+    render();
+  });
+}
+async function sendMove(item) {
+  const m = moves[item];
+  if (!m || m.state !== 'pending') return;
+  m.state = 'sending';
+  render();
+  try {
+    if (!feed.demo) {   // made-up data: pretend, so the hosted demo can show it
+      const res = await fetch('api/advance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Devfeed': '1' },
+        body: JSON.stringify({ item, from: m.from }),
+      });
+      let body = {};
+      try { body = await res.json(); } catch (e) {}
+      if (!res.ok) throw new Error(body.error || (res.status === 501
+        ? 'this server is read-only (serve with devfeed.py serve)' : 'HTTP ' + res.status));
+    }
+    m.state = 'done';
+    m.at = new Date().toISOString();
+    toast(m.ref + ' moved to ' + m.to);
+  } catch (e) {
+    delete moves[item];
+    toast("Couldn't move " + m.ref + ': ' + e.message, null, true);
+  }
+  render();
+}
+
+let toastTimer = null;
+function toast(text, undo, bad) {
+  const t = document.getElementById('toast');
+  t.replaceChildren(el('span', null, text));
+  t.className = bad ? 'bad' : '';
+  if (undo) {
+    const b = el('button', null, 'Undo');
+    b.onclick = () => { undo(); t.hidden = true; };
+    t.appendChild(b);
+  }
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, bad ? 8000 : UNDO_MS);
+}
+
+// Drag a row sideways past ~a third of its width (at most 110px) to act; a
+// short drag springs back. Vertical drags scroll as usual (touch-action: pan-y).
+function swipeable(row, left, right, seen) {
+  const wrap = el('div', 'swipe');
+  const bg = el('div', 'swipe-bg');
+  bg.append(el('span', 'go', right ? right.label : ''), el('span', 'seen-l', left.label));
+  wrap.append(bg, row);
+  if (seen) wrap.dataset.seen = '1';
+  row.draggable = false;
+  let x0 = 0, y0 = 0, dx = 0, pid = null, axis = null, dragged = false;
+  const reach = () => Math.min(110, wrap.offsetWidth * 0.3);
+  row.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || pid !== null) return;
+    pid = e.pointerId; x0 = e.clientX; y0 = e.clientY; dx = 0; axis = null; dragged = false;
+  });
+  row.addEventListener('pointermove', e => {
+    if (e.pointerId !== pid) return;
+    const mx = e.clientX - x0, my = e.clientY - y0;
+    if (!axis) {
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return;
+      axis = Math.abs(mx) > Math.abs(my) * 1.3 ? 'x' : 'y';
+      if (axis === 'x') { row.setPointerCapture(pid); wrap.classList.add('dragging'); }
+    }
+    if (axis !== 'x') return;
+    dragged = true;
+    dx = mx > 0 && !right ? mx / 5 : mx;   // nothing to do that way: resist
+    row.style.transform = 'translateX(' + dx + 'px)';
+    wrap.dataset.dir = dx > 0 ? 'right' : 'left';
+    wrap.classList.toggle('armed', Math.abs(dx) >= reach() && (dx < 0 || !!right));
+  });
+  const end = e => {
+    if (e.pointerId !== pid) return;
+    pid = null;
+    wrap.classList.remove('dragging');
+    const go = axis === 'x' && Math.abs(dx) >= reach() ? (dx < 0 ? left : right) : null;
+    if (go && dx < 0 && !seen) {   // seen: slide it away, then redraw without it
+      row.style.transform = 'translateX(-100%)';
+      setTimeout(go.run, 170);
+      return;
+    }
+    row.style.transform = '';
+    wrap.classList.remove('armed');
+    setTimeout(() => { if (pid === null) delete wrap.dataset.dir; }, 200);
+    if (go) go.run();
+  };
+  row.addEventListener('pointerup', end);
+  row.addEventListener('pointercancel', e => { dx = 0; end(e); });
+  row.addEventListener('click', e => { if (dragged) { e.preventDefault(); dragged = false; } });
+  return wrap;
 }
 /* ------- since you last looked ------- */
 // Per device (localStorage). The boundary stays fixed while the page is open,
@@ -531,7 +728,10 @@ function boardIcon(color) {
 function boardSection() {
   const b = feed.board;
   if (!b) return null;
-  const cards = b.cards.filter(c => !filterRepo || c.repo === filterRepo);
+  const cards = b.cards.filter(c => !filterRepo || c.repo === filterRepo).map(c => {
+    const to = movedTo(c);   // a swipe the next collect hasn't picked up yet
+    return to ? { ...c, status: to, since: moves[c.item].at } : c;
+  });
   const open = cards.filter(c => c.status !== 'Done');
   const countOnly = b.count_only_columns || [];   // e.g. a Backlog: counted, not listed
   const sec = el('div', 'openwork-sec');
@@ -558,6 +758,7 @@ function boardSection() {
   open.sort((a, b) => (b.needs_human - a.needs_human) || (order(a) - order(b)) ||
     (b.since || '').localeCompare(a.since || ''));
   const list = el('div', 'entries');
+  const rows = [];
   for (const c of open) {
     if (countOnly.includes(c.status)) continue;
     const flags = [];
@@ -573,10 +774,11 @@ function boardSection() {
       const rest = labels.slice(MAX_LABELS).map(l => l.name).join(', ');
       flags.push(['+' + (labels.length - MAX_LABELS), null, null, rest]);
     }
-    const row = openWorkRow({ ...c, ts: c.since || '', repo: repoOf(c.repo) }, boardIcon,
-      c.status + (c.since ? ' since ' + rel(c.since) : ''), flags, c.ref);
-    list.appendChild(row);
+    rows.push(openWorkRow({ ...c, ts: c.since || '', repo: repoOf(c.repo) }, boardIcon,
+      c.status + (c.since ? ' since ' + rel(c.since) : ''), flags, c.ref,
+      { key: 'card:' + c.url, stamp: [c.status, c.since, c.needs_human].join('|'), card: c }));
   }
+  fillEntries(list, rows, 'board');
   sec.appendChild(list);
   return sec;
 }
@@ -608,21 +810,25 @@ function nextUpSection() {
       if (!flags.length) flags.push(['no blockers']);
       if (n.then.length) flags.push(['then ' + n.then.map(t => t.ref).join(', '), null, null,
         n.then.map(t => t.ref + ' ' + t.title).join('\n')]);
-      rows.push(openWorkRow({ ...c, ts: '', repo }, nextIcon, 'build next · ' + c.status, flags, c.ref));
+      rows.push(openWorkRow({ ...c, ts: '', repo }, nextIcon, 'build next · ' + c.status, flags, c.ref,
+        { key: 'next:' + c.url, stamp: c.status, card: { ...c, repo: n.repo } }));
     }
     for (const h of n.needs_you) {
       rows.push(openWorkRow({ ...h, ts: '', repo }, nextIcon, 'held · ' + h.status,
-        [['needs you', 'bad'], ['blocks ' + refList(h.unblocks), 'warn']], h.ref));
+        [['needs you', 'bad'], ['blocks ' + refList(h.unblocks), 'warn']], h.ref,
+        { key: 'held:' + h.url, stamp: h.status + '|' + h.unblocks.join(',') }));
     }
     for (const p of n.conflicts) {
       const title = p.a.ref + ' ' + p.a.title + '  ·  ' + p.b.ref + ' ' + p.b.title;
       rows.push(openWorkRow({ title, url: p.a.url, ts: '', repo }, nextIcon,
         "don't build together", [['both change ' + p.paths[0], 'warn', null, p.paths.join('\n')]],
-        p.a.ref + '+' + p.b.ref));
+        p.a.ref + '+' + p.b.ref,
+        { key: 'conflict:' + p.a.url + ' ' + p.b.url, stamp: p.paths.join(',') }));
     }
     for (const w of n.waiting) {
       rows.push(openWorkRow({ ...w, ts: '', repo, old: true }, nextIcon, 'waiting · ' + w.status,
-        [['waits on ' + refList(w.blocked_by)]], w.ref));
+        [['waits on ' + refList(w.blocked_by)]], w.ref,
+        { key: 'wait:' + w.url, stamp: w.status + '|' + w.blocked_by.join(',') }));
     }
   }
   return rows.length ? openWorkSection('Next up', rows) : null;
@@ -653,7 +859,8 @@ function renderOpenWork(timeline) {
       const age = days(p.opened);
       if (age >= STALE_PR_DAYS) flags.push(['open ' + age + 'd', 'warn']);
       return openWorkRow({ ...p, newAt: p.opened, old: age >= STALE_PR_DAYS }, prIcon,
-        age >= STALE_PR_DAYS ? 'opened' : 'opened ' + rel(p.opened), flags, p.ref);
+        age >= STALE_PR_DAYS ? 'opened' : 'opened ' + rel(p.opened), flags, p.ref,
+        { key: 'pr:' + p.url, stamp: [p.ts, p.checks, p.review, p.draft].join('|') });
     })));
   }
   if (branches.length) {
@@ -661,7 +868,8 @@ function renderOpenWork(timeline) {
       const age = days(b.ts);
       const quiet = age >= QUIET_BRANCH_DAYS;
       return openWorkRow({ ...b, old: quiet }, commitIcon, 'last commit',
-        quiet ? [['quiet ' + age + 'd', 'warn']] : [], b.branch);
+        quiet ? [['quiet ' + age + 'd', 'warn']] : [], b.branch,
+        { key: 'branch:' + b.url, stamp: b.ts });
     })));
   }
   // The board is what's planned; open PRs and branches are what needs you now, so they go first.
@@ -860,7 +1068,13 @@ function render() {
   const age = (Date.now() - new Date(feed.generated_at)) / 60000;
   document.getElementById('updated').textContent = 'updated ' + rel(feed.generated_at);
   pill.classList.toggle('stale', age > 4 * (feed.interval_minutes || 5));
+  liveRowKeys.clear();
   if (view === 'shiplog') renderShipLog(root); else renderFeed(root);
+  if (view === 'feed' && !filterRepo) {   // forget seen marks for rows that are gone
+    let pruned = false;
+    for (const k in seenRows) if (!liveRowKeys.has(k)) { delete seenRows[k]; pruned = true; }
+    if (pruned) saveSeenRows();
+  }
 }
 
 function setView(v) {
@@ -888,8 +1102,11 @@ function showDemo() {
 }
 
 // The hosted demo is built once a day; move its timestamps up to now so it never looks stale.
+// The shift is fixed per page load, so a row swiped "seen" stays seen across refreshes.
+let demoShift = null;
 function freshen(f) {
-  const shift = Date.now() - new Date(f.generated_at);
+  if (demoShift === null) demoShift = Date.now() - new Date(f.generated_at);
+  const shift = demoShift;
   const move = ts => ts ? new Date(new Date(ts).getTime() + shift).toISOString().replace(/\.\d+Z$/, 'Z') : ts;
   const keys = ['ts', 'opened', 'since', 'last_activity', 'generated_at'];
   (function walk(o) {
@@ -910,7 +1127,7 @@ async function refresh() {
       if (!wasLoaded) showDemo();
     }
     document.getElementById('err').style.display = 'none';
-    render();
+    if (!document.querySelector('.swipe.dragging')) render();   // not under a finger
   } catch (e) {
     const err = document.getElementById('err');
     err.textContent = 'Could not load feed.json — collector may not have run yet. (' + e.message + ')';

@@ -13,3 +13,7 @@ this list.
 - Paths guessed from prose are noisy (`src/app/` overlaps everything, code like `router.replace('/')`) → exact-file matches only unless both cards list a Touches section.
 - Long flags overflowed rows at phone width → flags wrap; check every new row type at ~400px.
 - "Today" in sparklines is the viewer's local day, not UTC.
+- The page is the only client for writes, but any site the viewer opens can POST to it → JSON content type + `X-Devfeed` header (forces a preflight that's never answered) and a `Host` allowlist (DNS rebinding); never add CORS headers.
+- The page can be minutes stale when a card is swiped → the server re-reads the card and refuses unless it's still in the column the page saw.
+- Seen marks key on timestamps → the hosted demo's time shift must stay fixed per page load, or seen rows come back every refresh.
+- A drag on a link fires a click on release → swallow the click after a drag; a tap must still open the link.
