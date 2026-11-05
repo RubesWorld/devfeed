@@ -13,7 +13,6 @@ this list.
 - Paths guessed from prose are noisy (`src/app/` overlaps everything, code like `router.replace('/')`) → exact-file matches only unless both cards list a Touches section.
 - Long flags overflowed rows at phone width → flags wrap; check every new row type at ~400px.
 - "Today" in sparklines is the viewer's local day, not UTC.
-
 - An empty `gh repo list` wiped the feed (#8) → an empty answer from an upstream fetch counts as a failed fetch; keep the previous data.
 - A config `slot` of "3" or 2.5 crashed the HTML renderer (#8) → coerce or validate every config value read from JSON, and expect strings, floats and nulls.
 - An HTML render error stopped the whole send (#8) → if an extra output part fails, log it and fall back to the main path (send text only).
@@ -22,3 +21,7 @@ this list.
 - Digest state could advance without a sent mail (#7) → write state atomically, and only after the server accepts the mail.
 - Overlapping runs shared a tmp file and could move the window back (#7) → give each run its own tmp file; an older run never moves the window backwards.
 - Stored timestamps can be missing, malformed or in the future (#7) → fall back to a safe default window; never crash or skip a window.
+- The page is the only client for writes, but any site the viewer opens can POST to it → JSON content type + `X-Devfeed` header (forces a preflight that's never answered) and a `Host` allowlist (DNS rebinding); never add CORS headers.
+- The page can be minutes stale when a card is swiped → the server re-reads the card and refuses unless it's still in the column the page saw.
+- Seen marks key on timestamps → the hosted demo's time shift must stay fixed per page load, or seen rows come back every refresh.
+- A drag on a link fires a click on release → swallow the click after a drag; a tap must still open the link.

@@ -20,6 +20,9 @@ you last looked.
 - **Next up.** Per repo, which board card to build next so the rest gets easier: what
   it unblocks, which files it shares with other cards, and which cards shouldn't be
   built at the same time. Structure, not feature priority. See below.
+- **Swipe.** On a phone (or by dragging with a mouse), swipe a row left to mark it seen:
+  it's hidden on that device until it changes. Swipe a board card right to move it to
+  the next column, if you've allowed that move. See below.
 - **Ship Log.** A second, calmer view: everything shipped, by project and day.
 - **Morning digest.** An optional plain-text email: per active repo, where you left off,
   what's next and what's waiting on you, plus what changed since the last one. See below.
@@ -66,6 +69,7 @@ for macOS, a systemd unit for Linux, and a cron line if you'd rather serve
 | `owner` | — | GitHub user or org whose repos to watch. `owners` takes a list. |
 | `bind` | `127.0.0.1` | Address to serve on. Use a VPN address (Tailscale, say) to reach it from your phone without exposing it to the internet. |
 | `port` | `8300` | |
+| `hosts` | `[]` | Extra names you open the page by (e.g. a tailnet name), so swipe moves are accepted from them. |
 | `interval_minutes` | `5` | How often `serve` re-fetches. The page flags itself stale after 4 missed runs. |
 | `active_days` | `14` | A repo shows up if pushed within this many days. |
 | `days` | `30` | How far back the shipped list goes. |
@@ -86,7 +90,7 @@ Columns come from the board's own `Status` field, in order. Optional keys: `titl
 (defaults to the board's name), `done_column` (`"Done"`), `active_columns` (which
 columns count as "in progress" for the stuck flag; defaults to the last two before
 Done), `count_only_columns` (`[]`; columns like a Backlog that get a count chip but
-no rows), `attention_label` (`"needs-human"`), `hide_labels` (`[]`) and `next_up`
+no rows), `attention_label` (`"needs-human"`), `hide_labels` (`[]`), `next_up` and `advance`
 (below). Reading a board needs the
 `read:project` scope: `gh auth refresh -s read:project`.
 
@@ -143,6 +147,30 @@ instead, and those only count as shared when it's the exact same file.
 before `active_columns`), `hold_labels` (a trailing `:` matches as a prefix, so `risk:`
 holds `risk:auth`), `depends_heading` (`"Depends on"`), `touches_heading` (`"Touches"`)
 and `size_prefix` (`"size:"`).
+
+### Swipe
+
+Swipe any row under Next up, Waiting for review, In progress or the board **left** to
+mark it seen. It's hidden on that device until it changes (a new commit, a new column,
+checks flipping), and "N seen · show" under each section brings seen rows back. Swiping
+a seen row left again un-sees it.
+
+Swipe a board card **right** to move it one column. A move isn't written to GitHub until
+an Undo toast has been up for 5 seconds. Only moves you list are allowed:
+
+```json
+"board": { "owner": "you", "number": 1,
+  "advance": { "Spec'd": "Ready",
+               "Backlog": { "to": "Inbox", "add_labels": ["inbox"], "remove_labels": ["backlog"] } } }
+```
+
+Each key is a column a card may leave. The value is the column it moves to, or an
+object that also changes labels (labels change before the column, for automation keyed
+on labels). Cards with your `attention_label` or a `next_up.hold_labels` label never
+move. Moves need `devfeed.py serve` (a plain static server can't write; use
+`serve --no-collect` if cron already runs `collect`) and the `project` scope:
+`gh auth refresh -s project`. The server re-checks every move against GitHub: the
+card is on this board, still in that column, open and not held.
 
 ## Digest
 
@@ -207,6 +235,14 @@ Each repo costs about three GitHub API calls per run, so 20 active repos at the 
 devfeed shows whatever your `gh` login can see, private repos included, to anyone
 who can reach the page. It binds to `127.0.0.1` by default. If you change `bind`,
 put it on a private network, not the open internet.
+
+With `board.advance` set, anyone who can reach the page can also make those moves, and
+only those. Writes need a JSON body and an `X-Devfeed` header, which a page on another
+site can't send without a CORS preflight that devfeed never answers. They also need a
+`Host` header devfeed serves under: the bind address, `localhost` when bound to
+loopback, and any names you list in `hosts` (for example
+`"hosts": ["mini.tailnet.ts.net"]` if you open the page by a tailnet name). That keeps
+DNS-rebinding pages out.
 
 ## License
 

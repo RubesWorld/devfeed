@@ -5,6 +5,7 @@ A few commands, standard library only, GitHub access through the gh CLI:
 
     python3 devfeed.py collect   # fetch once and write public/feed.json
     python3 devfeed.py serve     # serve the page and re-collect every few minutes
+                                 # (--no-collect if cron runs collect instead)
     python3 devfeed.py demo      # serve made-up data, no GitHub needed
     python3 devfeed.py digest    # collect once and email a morning digest
                                  # (--dry-run prints it, --demo renders made-up data)
@@ -93,11 +94,11 @@ def gh_bin():
     return found
 
 
-def gh(*args):
+def gh(*args, parse=True):
     r = subprocess.run([gh_bin(), *args], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:2])}: {r.stderr.strip()[:200]}")
-    return json.loads(r.stdout)
+    return json.loads(r.stdout) if parse else r.stdout
 
 
 def utc_cutoff(days):
@@ -245,6 +246,7 @@ query($owner: String!, $number: Int!, $after: String) {
         items(first: 100, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
+            id
             status: fieldValueByName(name: "Status") {
               ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
             }
@@ -309,6 +311,7 @@ def fetch_board(board):
         cards.append({
             "title": c["title"].strip(),
             "url": c["url"],
+            "item": item["id"],      # the board item, for POST /api/advance
             "repo": c["repository"]["nameWithOwner"],
             "ref": f"#{c['number']}",
             "status": "Done" if status == done else status,
@@ -334,6 +337,9 @@ def fetch_board(board):
         "columns": columns,
         "active_columns": board.get("active_columns", columns[-2:]),
         "count_only_columns": board.get("count_only_columns", []),
+        # Which column a swipe may move a card to, from which (see advance()).
+        "advance": {k: r["to"] for k, r in advance_rules(board).items()
+                    if k in columns and r["to"] in columns + [done]},
         "cards": cards,
     }
 
@@ -440,7 +446,8 @@ def next_up(board, cfg_board):
         return k[len(repo):] if k.startswith(repo + "#") else k
 
     def brief(c):
-        return {"ref": c["ref"], "title": c["title"], "url": c["url"], "status": c["status"]}
+        return {"ref": c["ref"], "title": c["title"], "url": c["url"], "status": c["status"],
+                "item": c.get("item")}
 
     out = []
     for repo in sorted({c["repo"] for c in open_cards.values()}):
@@ -660,7 +667,9 @@ def demo_feed():
     board = {"title": "Roadmap", "url": "https://github.com/orgs/acme/projects/1",
              "columns": ["Inbox", "Ready", "In Progress", "Review"],
              "active_columns": ["In Progress", "Review"],
+             "advance": {"Inbox": "Ready"},
              "cards": [{"title": t, "url": f"https://github.com/{r}/issues/{n[1:]}", "repo": r,
+                        "item": f"demo-{r.split('/')[1]}-{n[1:]}",
                         "ref": n, "status": st, "since": ago(h), "closed": st == "Done",
                         "needs_human": nh,
                         "labels": [{"name": ln, "color": lc} for ln, lc in labels],
@@ -1201,6 +1210,115 @@ def digest(cfg, config_path, dry_run, html=False):
     log(f"digest sent to {', '.join(settings['to'])}: {subject}")
     return 0
 
+# ------------------------------------------------------------------ advance
+# The page's only write: swipe a board card one step along an allowlist the
+# owner configured, e.g.
+#
+#   "advance": { "Spec'd": "Ready",
+#                "Backlog": { "to": "Inbox", "add_labels": ["inbox"], "remove_labels": ["backlog"] } }
+#
+# Off unless `board.advance` is set. Everything the page sends is re-checked
+# here against GitHub: the card is on this board, still in that column, open,
+# and not held. Labels change before the column, so automation keyed on labels
+# sees a consistent card.
+
+ITEM_QUERY = """
+query($id: ID!) {
+  node(id: $id) {
+    ... on ProjectV2Item {
+      project {
+        id number
+        owner { ... on User { login } ... on Organization { login } }
+        field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+      }
+      status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+      content {
+        ... on Issue { number state repository { nameWithOwner } labels(first: 50) { nodes { name } } }
+      }
+    }
+  }
+}
+"""
+
+SET_STATUS = """
+mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field,
+                                        value: {singleSelectOptionId: $option}}) {
+    projectV2Item { id }
+  }
+}
+"""
+
+ITEM_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+
+
+class Refused(Exception):
+    """An advance the server won't make; `code` is the HTTP status to answer with."""
+
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+
+
+def advance_rules(board):
+    """`board.advance` normalised to {from: {to, add_labels, remove_labels}}."""
+    rules = {}
+    for frm, rule in ((board or {}).get("advance") or {}).items():
+        if isinstance(rule, str):
+            rule = {"to": rule}
+        if not isinstance(rule, dict) or not isinstance(rule.get("to"), str) or rule["to"] == frm:
+            continue
+        rules[frm] = {"to": rule["to"],
+                      "add_labels": list(rule.get("add_labels") or []),
+                      "remove_labels": list(rule.get("remove_labels") or [])}
+    return rules
+
+
+def advance(board, item, frm, run=None):
+    """Move one card from `frm` to the column the allowlist says. `run` is gh
+    (swappable for tests). Returns {"ref", "status"}; raises Refused."""
+    run = run or gh
+    rule = advance_rules(board).get(frm) if isinstance(frm, str) else None
+    if not rule:
+        raise Refused(403, f"moving cards out of {frm!r} isn't allowed (board.advance)")
+    if not isinstance(item, str) or not ITEM_ID.match(item):
+        raise Refused(400, "bad item id")
+    node = (run("api", "graphql", "-f", f"query={ITEM_QUERY}", "-f", f"id={item}")
+            .get("data") or {}).get("node")
+    if not node or not node.get("project"):
+        raise Refused(404, "no such card")
+    project, content = node["project"], node.get("content") or {}
+    owner = ((project.get("owner") or {}).get("login") or "").lower()
+    if project.get("number") != board.get("number") or owner != str(board.get("owner", "")).lower():
+        raise Refused(403, "that card isn't on the configured board")
+    if not content.get("number"):
+        raise Refused(409, "only issue cards can be moved")
+    repo, number = content["repository"]["nameWithOwner"], content["number"]
+    ref = f"{repo}#{number}"
+    status = (node.get("status") or {}).get("name")
+    if status != frm:
+        raise Refused(409, f"{ref} is in {status or 'no column'} now, not {frm}")
+    if content.get("state") != "OPEN":
+        raise Refused(409, f"{ref} is closed")
+    nu = board.get("next_up") or {}
+    attention = board.get("attention_label", "needs-human")
+    held = [l["name"] for l in content["labels"]["nodes"]
+            if l["name"] == attention or held_label(l["name"], nu)]
+    if held:
+        raise Refused(409, f"{ref} is held ({', '.join(held)})")
+    field = project.get("field") or {}
+    option = next((o["id"] for o in field.get("options") or [] if o["name"] == rule["to"]), None)
+    if not option:
+        raise Refused(500, f"the board has no {rule['to']!r} column")
+    edits = [x for name in rule["add_labels"] for x in ("--add-label", name)]
+    edits += [x for name in rule["remove_labels"] for x in ("--remove-label", name)]
+    if edits:
+        run("issue", "edit", str(number), "--repo", repo, *edits, parse=False)
+    run("api", "graphql", "-f", f"query={SET_STATUS}", "-f", f"project={project['id']}",
+        "-f", f"item={item}", "-f", f"field={field['id']}", "-f", f"option={option}")
+    log(f"advanced {ref}: {frm} -> {rule['to']}")
+    return {"ref": ref, "status": rule["to"]}
+
 
 class Server(http.server.ThreadingHTTPServer):
     """HTTPServer.server_bind does a reverse-DNS lookup of the bind address,
@@ -1222,7 +1340,68 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def serve(cfg, collecting=True):
+class Handler(NoCacheHandler):
+    """The static page, plus POST /api/advance when the board allows it.
+
+    A write needs Content-Type: application/json and an X-Devfeed header, which
+    no cross-site form or simple fetch can send without a CORS preflight this
+    server never answers. The Host header must be one we serve under (so a
+    rebinding DNS name can't reach it), and an Origin, when sent, must match."""
+
+    cfg = {}
+
+    def do_POST(self):
+        try:
+            self.reply(200, self.advance_request())
+        except Refused as e:
+            self.reply(e.code, {"error": str(e)})
+        except Exception as e:   # gh failed: say why, the page shows it
+            log(f"advance failed: {e}")
+            self.reply(502, {"error": str(e)[:300]})
+
+    def advance_request(self):
+        if self.path != "/api/advance":
+            raise Refused(404, "not found")
+        hosts = allowed_hosts(self.cfg)
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        if host not in hosts or (origin is not None and origin != f"http://{host}"):
+            raise Refused(403, "wrong host")
+        if (self.headers.get("X-Devfeed") != "1"
+                or self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json"):
+            raise Refused(403, "not from the page")
+        length = self.headers.get("Content-Length", "")
+        length = int(length) if length.isdigit() else 0
+        if not 0 < length <= 2048:
+            raise Refused(400, "bad request")
+        try:
+            body = json.loads(self.rfile.read(length))
+        except ValueError:
+            raise Refused(400, "bad request")
+        if not isinstance(body, dict):
+            raise Refused(400, "bad request")
+        return advance(self.cfg.get("board") or {}, body.get("item"), body.get("from"))
+
+    def reply(self, code, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def allowed_hosts(cfg):
+    """Host headers a write may arrive under: the bind address, localhost when
+    bound to loopback, and any names listed in `hosts` (e.g. a tailnet name)."""
+    port = cfg["port"]
+    names = [cfg["bind"]] + list(cfg.get("hosts") or [])
+    if cfg["bind"] in ("127.0.0.1", "::1", "localhost"):
+        names += ["localhost", "127.0.0.1"]
+    return {f"[{n}]:{port}" if ":" in n else f"{n}:{port}" for n in names}
+
+
+def serve(cfg, collecting=True, demo=False):
     def loop():
         while True:
             collect_safely(cfg)
@@ -1230,10 +1409,13 @@ def serve(cfg, collecting=True):
 
     if collecting:
         threading.Thread(target=loop, daemon=True).start()
-    handler = functools.partial(NoCacheHandler, directory=PUBLIC)
+    handler = functools.partial(type("ConfiguredHandler", (Handler,), {"cfg": cfg}),
+                                directory=PUBLIC)
     server = Server((cfg["bind"], cfg["port"]), handler)
     log(f"serving http://{cfg['bind']}:{cfg['port']} " + (
-        f"(collecting every {cfg['interval_minutes']} min)" if collecting else "(demo data)"))
+        "(demo data)" if demo else f"(collecting every {cfg['interval_minutes']} min)"
+        if collecting else "(not collecting)") + (
+        "; swipe moves on" if advance_rules(cfg.get("board")) else ""))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1249,6 +1431,8 @@ def main():
     p.add_argument("--port", type=int, help="override the port from config.json")
     p.add_argument("--dry-run", action="store_true", help="digest: print the email, don't send it")
     p.add_argument("--demo", action="store_true", help="digest: render made-up data, no GitHub")
+    p.add_argument("--no-collect", action="store_true",
+                   help="serve: only serve the page; something else runs collect")
     p.add_argument("--html", action="store_true",
                    help="digest, with --demo or --dry-run: print the HTML part instead of the text")
     args = p.parse_args()
@@ -1267,7 +1451,7 @@ def main():
         os.makedirs(PUBLIC, exist_ok=True)
         with open(OUT_PATH, "w") as f:
             json.dump(demo_feed(), f)
-        serve({**DEFAULTS, "port": args.port or DEFAULTS["port"]}, collecting=False)
+        serve({**DEFAULTS, "port": args.port or DEFAULTS["port"]}, collecting=False, demo=True)
         return
     if not os.path.exists(args.config):
         sys.exit(f"No config at {args.config}. Start from config.example.json.")
@@ -1278,7 +1462,7 @@ def main():
         sys.exit(0 if collect_safely(cfg) else 1)
     if args.command == "digest":
         sys.exit(digest(cfg, args.config, args.dry_run, args.html))
-    serve(cfg)
+    serve(cfg, collecting=not args.no_collect)
 
 
 if __name__ == "__main__":
